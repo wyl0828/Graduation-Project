@@ -2,6 +2,8 @@
 
 Spring Boot 单体分层应用的工程入口。当前仅包含启动、健康检查、Flyway 迁移入口与 MyBatis-Plus 基础依赖，不实现业务模块。
 
+模块依赖、公共能力归属及 SOS/预约工单事务的候选实现见[现行后端代码架构](../../docs/current/后端代码架构.md)。业务包、Entity、Mapper 和协调 Service 均未创建；设计须随实现核对并更新。
+
 从仓库根目录运行：
 
 ```powershell
