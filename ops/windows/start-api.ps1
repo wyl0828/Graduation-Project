@@ -33,7 +33,15 @@ try {
     foreach ($entry in $values.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
     [Environment]::SetEnvironmentVariable('DB_HOST', $dbHost, 'Process')
     [Environment]::SetEnvironmentVariable('DB_NAME', $dbName, 'Process')
-    if (-not $env:APP_STORAGE_ROOT) { [Environment]::SetEnvironmentVariable('APP_STORAGE_ROOT', '.local-data/files', 'Process') }
+    $storageValue = if ($values.ContainsKey('APP_STORAGE_ROOT') -and $values['APP_STORAGE_ROOT']) {
+        $values['APP_STORAGE_ROOT']
+    } else {
+        '.local-data/files'
+    }
+    if (-not [System.IO.Path]::IsPathRooted($storageValue)) {
+        $storageValue = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $storageValue))
+    }
+    [Environment]::SetEnvironmentVariable('APP_STORAGE_ROOT', $storageValue, 'Process')
 
     Push-Location $repoRoot
     try {
