@@ -1,0 +1,26 @@
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
+# Local runtime data and uploaded files
+.local-data/
+*.log
+
+# Java and Maven
+**/target/
+.mvn/wrapper/maven-wrapper.jar.sha256
+
+# Node and frontend build artifacts
+**/node_modules/
+**/dist/
+**/unpackage/
+npm-debug.log*
+
+# IDEs and operating system files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+Desktop.ini

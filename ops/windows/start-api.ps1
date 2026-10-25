@@ -1,0 +1,47 @@
+$ErrorActionPreference = 'Stop'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$envLocal = Join-Path $repoRoot '.env.local'
+$allowedKeys = @('DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD', 'APP_STORAGE_ROOT')
+
+if (-not (Test-Path -LiteralPath $envLocal)) {
+    throw '缺少 .env.local。请先运行 ./ops/windows/init-local.ps1 并填写本机配置。'
+}
+
+$values = @{}
+foreach ($line in Get-Content -LiteralPath $envLocal) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+    if ($trimmed -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { throw '本地环境文件存在无效行。' }
+    $key = $Matches[1]
+    $value = $Matches[2].Trim()
+    if ($key -notin $allowedKeys) { throw "本地环境文件包含未支持的变量名：$key" }
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+    $values[$key] = $value
+}
+
+$dbHost = if ($values.ContainsKey('DB_HOST')) { $values['DB_HOST'] } else { '127.0.0.1' }
+$dbName = if ($values.ContainsKey('DB_NAME')) { $values['DB_NAME'] } else { 'elderly_care_demo' }
+if ($dbHost -notin @('localhost', '127.0.0.1', '::1')) { throw '仅允许连接本机 MySQL；DB_HOST 必须是 localhost、127.0.0.1 或 ::1。' }
+if ($dbName -ne 'elderly_care_demo') { throw '仅允许连接隔离演示库 elderly_care_demo。' }
+
+$previousValues = @{}
+foreach ($key in $allowedKeys) { $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
+
+try {
+    foreach ($entry in $values.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+    [Environment]::SetEnvironmentVariable('DB_HOST', $dbHost, 'Process')
+    [Environment]::SetEnvironmentVariable('DB_NAME', $dbName, 'Process')
+    if (-not $env:APP_STORAGE_ROOT) { [Environment]::SetEnvironmentVariable('APP_STORAGE_ROOT', '.local-data/files', 'Process') }
+
+    Push-Location $repoRoot
+    try {
+        & (Join-Path $repoRoot 'mvnw.cmd') -f (Join-Path $repoRoot 'services\api\pom.xml') '-Dspring-boot.run.profiles=local' spring-boot:run
+        exit $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+} finally {
+    foreach ($key in $allowedKeys) { [Environment]::SetEnvironmentVariable($key, $previousValues[$key], 'Process') }
+}
