@@ -72,18 +72,27 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         Long highAgeCount = elderProfileMapper.selectCount(highAgeQuery);
         vo.setHighAgeAloneCount(highAgeCount != null ? highAgeCount : 0L);
 
-        // 2. 待处理预警与活跃 SOS
-        LambdaQueryWrapper<HealthAlert> alertQuery = new LambdaQueryWrapper<HealthAlert>()
-                .ne(HealthAlert::getStatus, "CLOSED")
-                .ne(HealthAlert::getStatus, "RESOLVED");
-        Long pendingAlerts = healthAlertMapper.selectCount(alertQuery);
+        // 2. 待处理预警与活跃 SOS (按老人所在社区隔离)
+        List<Long> communityElderIds = getElderIdsForCommunity(communityId);
 
-        LambdaQueryWrapper<SosEvent> sosQuery = new LambdaQueryWrapper<SosEvent>()
-                .in(SosEvent::getStatus, "ACCEPTED", "TRIGGERED");
-        Long pendingSos = sosEventMapper.selectCount(sosQuery);
+        long pendingAlerts = 0L;
+        long pendingSos = 0L;
+        if (!communityElderIds.isEmpty()) {
+            LambdaQueryWrapper<HealthAlert> alertQuery = new LambdaQueryWrapper<HealthAlert>()
+                    .in(HealthAlert::getElderId, communityElderIds)
+                    .ne(HealthAlert::getStatus, "CLOSED")
+                    .ne(HealthAlert::getStatus, "RESOLVED");
+            Long alertsCount = healthAlertMapper.selectCount(alertQuery);
+            pendingAlerts = alertsCount != null ? alertsCount : 0L;
 
-        long totalPending = (pendingAlerts != null ? pendingAlerts : 0L) + (pendingSos != null ? pendingSos : 0L);
-        vo.setPendingAlertsCount(totalPending);
+            LambdaQueryWrapper<SosEvent> sosQuery = new LambdaQueryWrapper<SosEvent>()
+                    .in(SosEvent::getElderId, communityElderIds)
+                    .in(SosEvent::getStatus, "ACCEPTED", "TRIGGERED");
+            Long sosCount = sosEventMapper.selectCount(sosQuery);
+            pendingSos = sosCount != null ? sosCount : 0L;
+        }
+
+        vo.setPendingAlertsCount(pendingAlerts + pendingSos);
 
         // 3. 工单履约率与当月结案真实统计
         LambdaQueryWrapper<WorkOrder> totalOrderQuery = new LambdaQueryWrapper<WorkOrder>()
@@ -109,33 +118,67 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         vo.setWorkOrderFulfillmentRate(fulfillmentRate);
         vo.setMonthlyClosedOrders(closedOrders != null ? closedOrders : 0L);
 
-        // 4. 用药合规率与今日打卡真实统计
+        // 4. 用药合规率与今日打卡真实统计 (按老人所在社区隔离)
         LocalDate today = LocalDate.now();
-        Long todayTasks = medicationTaskMapper.selectCount(new LambdaQueryWrapper<MedicationTask>()
-                .eq(MedicationTask::getTaskDate, today));
-        Long confirmedTasks = medicationTaskMapper.selectCount(new LambdaQueryWrapper<MedicationTask>()
-                .eq(MedicationTask::getTaskDate, today)
-                .eq(MedicationTask::getStatus, "CONFIRMED"));
+        long todayTasksCount = 0L;
+        long confirmedTasksCount = 0L;
+
+        if (!communityElderIds.isEmpty()) {
+            LambdaQueryWrapper<MedicationTask> taskQuery = new LambdaQueryWrapper<MedicationTask>()
+                    .in(MedicationTask::getElderId, communityElderIds)
+                    .eq(MedicationTask::getTaskDate, today);
+            Long tasks = medicationTaskMapper.selectCount(taskQuery);
+            todayTasksCount = tasks != null ? tasks : 0L;
+
+            LambdaQueryWrapper<MedicationTask> confirmedQuery = new LambdaQueryWrapper<MedicationTask>()
+                    .in(MedicationTask::getElderId, communityElderIds)
+                    .eq(MedicationTask::getTaskDate, today)
+                    .eq(MedicationTask::getStatus, "CONFIRMED");
+            Long confirmed = medicationTaskMapper.selectCount(confirmedQuery);
+            confirmedTasksCount = confirmed != null ? confirmed : 0L;
+        }
 
         double medicationRate = 100.0;
-        if (todayTasks != null && todayTasks > 0 && confirmedTasks != null) {
-            medicationRate = Math.round((confirmedTasks * 100.0 / todayTasks) * 10.0) / 10.0;
+        if (todayTasksCount > 0) {
+            medicationRate = Math.round((confirmedTasksCount * 100.0 / todayTasksCount) * 10.0) / 10.0;
         }
         vo.setMedicationComplianceRate(medicationRate);
-        vo.setTodayConfirmedCheckins(confirmedTasks != null ? confirmedTasks : 0L);
+        vo.setTodayConfirmedCheckins(confirmedTasksCount);
 
         return vo;
+    }
+
+    private List<Long> getElderIdsForCommunity(Long communityId) {
+        LambdaQueryWrapper<ElderProfile> query = new LambdaQueryWrapper<ElderProfile>()
+                .select(ElderProfile::getElderId);
+        if (communityId != null) {
+            query.eq(ElderProfile::getCommunityId, communityId);
+        }
+        List<ElderProfile> profiles = elderProfileMapper.selectList(query);
+        if (profiles == null || profiles.isEmpty()) {
+            return List.of();
+        }
+        return profiles.stream()
+                .map(ElderProfile::getElderId)
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     @Override
     public DashboardChartsVO getCharts(Long communityId, String period) {
         DashboardChartsVO chartsVO = new DashboardChartsVO();
 
-        // 1. 慢病画像分布构成 (根据在服药计划真实统计)
+        // 1. 慢病画像分布构成 (根据社区老人在服药计划真实统计)
+        List<Long> communityElderIds = getElderIdsForCommunity(communityId);
         List<DiseaseDistributionVO> diseases = new ArrayList<>();
-        List<MedicationPlan> activePlans = medicationPlanMapper.selectList(
-                new LambdaQueryWrapper<MedicationPlan>().eq(MedicationPlan::getStatus, "ACTIVE")
-        );
+        List<MedicationPlan> activePlans = List.of();
+        if (!communityElderIds.isEmpty()) {
+            activePlans = medicationPlanMapper.selectList(
+                    new LambdaQueryWrapper<MedicationPlan>()
+                            .in(MedicationPlan::getElderId, communityElderIds)
+                            .eq(MedicationPlan::getStatus, "ACTIVE")
+            );
+        }
 
         Map<String, Long> diseaseCountMap = new LinkedHashMap<>();
         diseaseCountMap.put("原发性高血压", 0L);
@@ -252,8 +295,14 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         int safeLimit = Math.max(1, Math.min(limit, 50));
         List<RealtimeAlertFeedVO> list = new ArrayList<>();
 
-        // 查询数据库中最近的健康告警 (真实数据)
+        List<Long> communityElderIds = getElderIdsForCommunity(communityId);
+        if (communityElderIds.isEmpty()) {
+            return list;
+        }
+
+        // 查询数据库中最近的健康告警 (按社区老人隔离)
         LambdaQueryWrapper<HealthAlert> alertWrapper = new LambdaQueryWrapper<HealthAlert>()
+                .in(HealthAlert::getElderId, communityElderIds)
                 .orderByDesc(HealthAlert::getCreatedAt)
                 .last("LIMIT " + safeLimit);
         List<HealthAlert> alerts = healthAlertMapper.selectList(alertWrapper);

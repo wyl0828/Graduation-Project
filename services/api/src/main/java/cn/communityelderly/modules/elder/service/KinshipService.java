@@ -19,5 +19,5 @@ public interface KinshipService {
 
     List<BoundElderVO> listBoundElders(Long childUserId);
 
-    List<FamilyLinkApplication> listApplications(String status);
+    List<KinshipApplicationVO> listApplications(String status);
 }

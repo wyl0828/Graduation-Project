@@ -6,6 +6,8 @@ import cn.communityelderly.common.exception.ForbiddenException;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.ObjectAuthorizationPolicy;
 import cn.communityelderly.modules.audit.service.AuditLogService;
+import cn.communityelderly.modules.auth.entity.UserAccount;
+import cn.communityelderly.modules.auth.mapper.UserAccountMapper;
 import cn.communityelderly.modules.elder.dto.*;
 import cn.communityelderly.modules.elder.entity.ElderFamilyLink;
 import cn.communityelderly.modules.elder.entity.ElderProfile;
@@ -32,17 +34,20 @@ public class KinshipServiceImpl implements KinshipService {
     private final ElderFamilyLinkMapper familyLinkMapper;
     private final FamilyLinkApplicationMapper applicationMapper;
     private final ElderProfileMapper elderProfileMapper;
+    private final UserAccountMapper userAccountMapper;
     private final AuditLogService auditLogService;
     private final ObjectAuthorizationPolicy authorizationPolicy;
 
     public KinshipServiceImpl(ElderFamilyLinkMapper familyLinkMapper,
                               FamilyLinkApplicationMapper applicationMapper,
                               ElderProfileMapper elderProfileMapper,
+                              UserAccountMapper userAccountMapper,
                               AuditLogService auditLogService,
                               ObjectAuthorizationPolicy authorizationPolicy) {
         this.familyLinkMapper = familyLinkMapper;
         this.applicationMapper = applicationMapper;
         this.elderProfileMapper = elderProfileMapper;
+        this.userAccountMapper = userAccountMapper;
         this.auditLogService = auditLogService;
         this.authorizationPolicy = authorizationPolicy;
     }
@@ -344,7 +349,7 @@ public class KinshipServiceImpl implements KinshipService {
     }
 
     @Override
-    public List<FamilyLinkApplication> listApplications(String status) {
+    public List<KinshipApplicationVO> listApplications(String status) {
         authorizationPolicy.requireRole("COMMUNITY_ADMIN", "GRID_WORKER");
         List<Long> scopedElderIds = authorizationPolicy.listElderIdsForCurrentUser();
         if (scopedElderIds.isEmpty()) {
@@ -356,7 +361,56 @@ public class KinshipServiceImpl implements KinshipService {
             wrapper.eq(FamilyLinkApplication::getStatus, status.trim().toUpperCase());
         }
         wrapper.orderByDesc(FamilyLinkApplication::getCreatedAt);
-        return applicationMapper.selectList(wrapper);
+        List<FamilyLinkApplication> apps = applicationMapper.selectList(wrapper);
+        if (apps == null || apps.isEmpty()) {
+            return List.of();
+        }
+
+        List<KinshipApplicationVO> result = new ArrayList<>();
+        for (FamilyLinkApplication app : apps) {
+            KinshipApplicationVO vo = new KinshipApplicationVO();
+            vo.setApplicationId(app.getApplicationId());
+            vo.setElderId(app.getElderId());
+            vo.setChildUserId(app.getChildUserId());
+            vo.setRelationship(app.getRelationship());
+            vo.setApplyReason(app.getApplyReason());
+            vo.setStatus(app.getStatus());
+            vo.setCreatedAt(app.getCreatedAt());
+            vo.setReviewedAt(app.getReviewedAt());
+            vo.setDecisionReason(app.getDecisionReason());
+
+            // 补充长辈档案信息
+            ElderProfile elder = elderProfileMapper.selectById(app.getElderId());
+            if (elder != null) {
+                vo.setElderName(elder.getName());
+                vo.setArchiveNo(elder.getArchiveNo());
+            }
+
+            // 补充申请子女账号信息
+            if (userAccountMapper != null && app.getChildUserId() != null) {
+                UserAccount user = userAccountMapper.selectById(app.getChildUserId());
+                if (user != null) {
+                    vo.setApplicantPhone(user.getPhoneNormalized());
+                    vo.setApplicantName("子女用户 (" + (user.getPhoneNormalized() != null && user.getPhoneNormalized().length() >= 7
+                            ? user.getPhoneNormalized().substring(user.getPhoneNormalized().length() - 4) : user.getUserId()) + ")");
+                }
+            }
+
+            // 关联 ElderFamilyLink 状态与编号
+            ElderFamilyLink link = familyLinkMapper.selectOne(
+                    new LambdaQueryWrapper<ElderFamilyLink>()
+                            .eq(ElderFamilyLink::getElderId, app.getElderId())
+                            .eq(ElderFamilyLink::getChildUserId, app.getChildUserId())
+            );
+            if (link != null) {
+                vo.setLinkId(link.getLinkId());
+                vo.setLinkStatus(link.getStatus());
+            }
+
+            result.add(vo);
+        }
+
+        return result;
     }
 
     private Long parseUserId(CurrentUser user) {

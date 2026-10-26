@@ -49,7 +49,7 @@ public class KinshipController {
 
     @GetMapping("/applications")
     @RequireRoles({"COMMUNITY_ADMIN", "GRID_WORKER"})
-    public Result<List<FamilyLinkApplication>> listApplications(@RequestParam(required = false) String status) {
+    public Result<List<KinshipApplicationVO>> listApplications(@RequestParam(required = false) String status) {
         return Result.success(kinshipService.listApplications(status));
     }
 

@@ -33,18 +33,30 @@ class KinshipServiceAuthorizationTest {
     private ElderFamilyLinkMapper familyLinkMapper;
     private FamilyLinkApplicationMapper applicationMapper;
     private ElderProfileMapper elderProfileMapper;
+    private cn.communityelderly.modules.auth.mapper.UserAccountMapper userAccountMapper;
     private AuditLogService auditLogService;
     private KinshipServiceImpl service;
 
     @BeforeEach
     void setUp() {
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(
+                        new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""), ElderProfile.class);
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(
+                        new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""), ElderFamilyLink.class);
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(
+                        new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""), FamilyLinkApplication.class);
+
         familyLinkMapper = mock(ElderFamilyLinkMapper.class);
         applicationMapper = mock(FamilyLinkApplicationMapper.class);
         elderProfileMapper = mock(ElderProfileMapper.class);
+        userAccountMapper = mock(cn.communityelderly.modules.auth.mapper.UserAccountMapper.class);
         auditLogService = mock(AuditLogService.class);
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(
                 elderProfileMapper, mock(cn.communityelderly.modules.elder.mapper.ElderIdentityLinkMapper.class), familyLinkMapper);
-        service = new KinshipServiceImpl(familyLinkMapper, applicationMapper, elderProfileMapper, auditLogService, policy);
+        service = new KinshipServiceImpl(familyLinkMapper, applicationMapper, elderProfileMapper, userAccountMapper, auditLogService, policy);
     }
 
     @AfterEach
