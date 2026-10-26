@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $envLocal = Join-Path $repoRoot '.env.local'
-$allowedKeys = @('DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD', 'APP_STORAGE_ROOT')
+$allowedKeys = @('DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD', 'APP_STORAGE_ROOT', 'AUTH_RATE_LIMIT_HMAC_KEY', 'AUTH_COOKIE_SECURE', 'PHONE_VERIFICATION_ENABLED')
 
 if (-not (Test-Path -LiteralPath $envLocal)) {
     throw '缺少 .env.local。请先运行 ./ops/windows/init-local.ps1 并填写本机配置。'
