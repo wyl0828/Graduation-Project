@@ -12,11 +12,7 @@
           <el-option label="富贵山社区" value="FUGUISHAN" />
           <el-option label="梅园新村社区" value="MEIYUAN" />
         </el-select>
-        <el-select v-model="selectedPeriod" style="width: 130px" size="default">
-          <el-option label="近 7 天" value="7D" />
-          <el-option label="近 30 天" value="30D" />
-          <el-option label="本年度" value="YEAR" />
-        </el-select>
+        <el-tag type="info" effect="plain">趋势范围：近 7 天</el-tag>
         <el-button type="primary" plain @click="refreshData">
           <el-icon><Refresh /></el-icon>
           <span>刷新数据</span>
@@ -28,6 +24,12 @@
       </div>
     </div>
 
+    <div v-if="summaryStatus === 'loading'" class="request-status" role="status">正在加载汇总数据…</div>
+    <div v-else-if="summaryStatus === 'empty'" class="request-status">暂无汇总数据</div>
+    <div v-else-if="summaryStatus === 'error'" class="request-status request-error" role="alert">
+      汇总数据加载失败：{{ summaryError }}
+    </div>
+
     <!-- 1. 核心 KPI 指标卡片 -->
     <div class="kpi-grid">
       <el-card class="kpi-card" shadow="hover">
@@ -37,9 +39,9 @@
           </div>
           <div class="kpi-text">
             <div class="kpi-label">辖区在册建档长辈</div>
-            <div class="kpi-value">{{ summaryData.totalElders }} <span class="unit">人</span></div>
+            <div class="kpi-value">{{ formatCount(summaryData?.totalElders) }} <span class="unit">人</span></div>
             <div class="kpi-sub">
-              <span>80岁以上高龄长者: <strong>{{ summaryData.highAgeAloneCount }}</strong> 人</span>
+              <span>80岁以上高龄长者: <strong>{{ formatCount(summaryData?.highAgeAloneCount) }}</strong> 人</span>
             </div>
           </div>
         </div>
@@ -52,9 +54,9 @@
           </div>
           <div class="kpi-text">
             <div class="kpi-label">待处理预警 / SOS</div>
-            <div class="kpi-value text-danger">{{ summaryData.pendingAlertsCount }} <span class="unit">起</span></div>
+            <div class="kpi-value text-danger">{{ formatCount(summaryData?.pendingAlertsCount) }} <span class="unit">起</span></div>
             <div class="kpi-sub">
-              <span>实时告警流响应中</span>
+              <span>服务端待处理预警统计</span>
             </div>
           </div>
         </div>
@@ -67,9 +69,9 @@
           </div>
           <div class="kpi-text">
             <div class="kpi-label">助老工单当月履约率</div>
-            <div class="kpi-value text-success">{{ summaryData.workOrderFulfillmentRate }}%</div>
+            <div class="kpi-value text-success">{{ formatPercent(summaryData?.workOrderFulfillmentRate) }}</div>
             <div class="kpi-sub">
-              <span>当月已结案: <strong>{{ summaryData.monthlyClosedOrders }}</strong> 单</span>
+              <span>当月已结案: <strong>{{ formatCount(summaryData?.monthlyClosedOrders) }}</strong> 单</span>
             </div>
           </div>
         </div>
@@ -82,9 +84,9 @@
           </div>
           <div class="kpi-text">
             <div class="kpi-label">长辈慢病用药合规率</div>
-            <div class="kpi-value text-warning">{{ summaryData.medicationComplianceRate }}%</div>
+            <div class="kpi-value text-warning">{{ formatPercent(summaryData?.medicationComplianceRate) }}</div>
             <div class="kpi-sub">
-              <span>今日已确认打卡: <strong>{{ summaryData.todayConfirmedCheckins }}</strong> 次</span>
+              <span>今日已确认打卡: <strong>{{ formatCount(summaryData?.todayConfirmedCheckins) }}</strong> 次</span>
             </div>
           </div>
         </div>
@@ -100,7 +102,12 @@
             <el-tag size="small" type="primary" effect="plain">慢病高发TOP 5</el-tag>
           </div>
         </template>
-        <div ref="diseaseChartRef" class="chart-box"></div>
+        <div class="chart-visual">
+          <div ref="diseaseChartRef" class="chart-box"></div>
+          <div v-if="chartStateMessage(hasDiseaseData, '慢病画像')" class="chart-state" role="status">
+            {{ chartStateMessage(hasDiseaseData, '慢病画像') }}
+          </div>
+        </div>
       </el-card>
 
       <el-card class="chart-card" shadow="hover">
@@ -110,7 +117,12 @@
             <el-tag size="small" type="success" effect="plain">当月工单分布</el-tag>
           </div>
         </template>
-        <div ref="servicePieChartRef" class="chart-box"></div>
+        <div class="chart-visual">
+          <div ref="servicePieChartRef" class="chart-box"></div>
+          <div v-if="chartStateMessage(hasServiceData, '服务需求')" class="chart-state" role="status">
+            {{ chartStateMessage(hasServiceData, '服务需求') }}
+          </div>
+        </div>
       </el-card>
     </div>
 
@@ -123,31 +135,41 @@
               <span class="card-head-title">📈 近 7 天助老工单走势与平均响应时长</span>
               <span class="card-head-hint">（双轴指标：工单吞吐量 vs 响应速度）</span>
             </div>
-            <el-tag size="small" type="info">平均响应: 18.5 分钟</el-tag>
+            <el-tag size="small" type="info">平均响应：服务端按日统计</el-tag>
           </div>
         </template>
-        <div ref="workOrderTrendChartRef" class="chart-box-large"></div>
+        <div class="chart-visual">
+          <div ref="workOrderTrendChartRef" class="chart-box-large"></div>
+          <div v-if="chartStateMessage(hasTrendData, '工单走势')" class="chart-state" role="status">
+            {{ chartStateMessage(hasTrendData, '工单走势') }}
+          </div>
+        </div>
       </el-card>
 
       <el-card class="chart-card flex-1" shadow="hover">
         <template #header>
           <div class="card-head-flex">
             <span class="card-head-title">🚨 实时健康预警与应急动态流</span>
-            <el-tag size="small" type="danger" effect="dark">动态监控中</el-tag>
+            <el-tag size="small" :type="alertFeedTagType" effect="dark">{{ alertFeedStatusLabel }}</el-tag>
           </div>
         </template>
-        <div class="alert-feed-list">
-          <div v-for="item in alertFeed" :key="item.id" class="feed-item" :class="item.level">
+        <div v-if="alertFeedStatus === 'loading'" class="feed-state" role="status">正在加载告警流…</div>
+        <div v-else-if="alertFeedStatus === 'empty'" class="feed-state">暂无预警数据</div>
+        <div v-else-if="alertFeedStatus === 'error'" class="feed-state request-error" role="alert">
+          告警流加载失败：{{ alertFeedError }}
+        </div>
+        <div v-else class="alert-feed-list">
+          <div v-for="item in alertFeed" :key="item.alertId" class="feed-item" :class="item.level || ''">
             <div class="feed-time-row">
-              <span class="feed-time">{{ item.time }}</span>
-              <el-tag :type="item.tagType" size="small">{{ item.tagText }}</el-tag>
+              <span class="feed-time">{{ item.time || '时间未提供' }}</span>
+              <el-tag :type="getAlertTagType(item.tagType)" size="small">{{ item.tagText || '预警' }}</el-tag>
             </div>
             <div class="feed-desc">
-              <strong>{{ item.elderName }}</strong> ({{ item.address }})：{{ item.description }}
+              <strong>{{ item.elderName || '未提供姓名' }}</strong> ({{ item.address || '地址未提供' }})：{{ item.description || '暂无说明' }}
             </div>
             <div class="feed-footer">
-              <span class="feed-handler">响应网格员：{{ item.handler }}</span>
-              <span class="feed-status" :class="item.status">{{ item.statusText }}</span>
+              <span class="feed-handler">响应网格员：{{ item.handler || '暂无处理人' }}</span>
+              <span class="feed-status" :class="item.status || ''">{{ item.statusText || item.status || '状态未知' }}</span>
             </div>
           </div>
         </div>
@@ -157,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import * as echarts from 'echarts'
 import {
   User,
@@ -168,21 +190,28 @@ import {
   FullScreen
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { adminApi } from '../../api/adminApi'
+import {
+  adminApi,
+  type DashboardChartsVO,
+  type DashboardSummaryVO,
+  type RealtimeAlertFeedVO,
+} from '../../api/adminApi'
+
+type DashboardRequestState = 'loading' | 'success' | 'empty' | 'error'
+type DashboardTagType = 'success' | 'info' | 'warning' | 'danger'
 
 const selectedCommunity = ref('BEIANMEN')
-const selectedPeriod = ref('7D')
 const isFullscreen = ref(false)
 
-const summaryData = reactive({
-  totalElders: 0,
-  highAgeAloneCount: 0,
-  pendingAlertsCount: 0,
-  workOrderFulfillmentRate: 100.0,
-  monthlyClosedOrders: 0,
-  medicationComplianceRate: 100.0,
-  todayConfirmedCheckins: 0,
-})
+const summaryData = ref<DashboardSummaryVO | null>(null)
+const chartsData = ref<DashboardChartsVO | null>(null)
+const alertFeed = ref<RealtimeAlertFeedVO[]>([])
+const summaryStatus = ref<DashboardRequestState>('loading')
+const chartsStatus = ref<DashboardRequestState>('loading')
+const alertFeedStatus = ref<DashboardRequestState>('loading')
+const summaryError = ref('')
+const chartsError = ref('')
+const alertFeedError = ref('')
 
 // DOM 引用
 const diseaseChartRef = ref<HTMLDivElement | null>(null)
@@ -193,9 +222,72 @@ const workOrderTrendChartRef = ref<HTMLDivElement | null>(null)
 let diseaseChart: echarts.ECharts | null = null
 let servicePieChart: echarts.ECharts | null = null
 let workOrderTrendChart: echarts.ECharts | null = null
+let dashboardRequestSequence = 0
 
-// 实时预警流数据
-const alertFeed = ref<any[]>([])
+function hasPositiveCount(values: Array<number | null> | null | undefined): boolean {
+  return values?.some(value => value != null && value > 0) ?? false
+}
+
+const hasDiseaseData = computed(() => hasPositiveCount(chartsData.value?.diseaseDistribution?.map(item => item.value)))
+const hasServiceData = computed(() => hasPositiveCount(chartsData.value?.serviceStructure?.map(item => item.orderCount)))
+const hasTrendData = computed(() => {
+  const trend = chartsData.value?.workOrderTrend
+  return Boolean(
+    trend?.dateList?.length &&
+    (hasPositiveCount(trend.dispatchedCounts) || hasPositiveCount(trend.closedCounts)),
+  )
+})
+const alertFeedStatusLabel = computed(() => {
+  if (alertFeedStatus.value === 'loading') return '加载中'
+  if (alertFeedStatus.value === 'empty') return '暂无预警'
+  if (alertFeedStatus.value === 'error') return '加载失败'
+  return '已更新'
+})
+const alertFeedTagType = computed<DashboardTagType>(() => {
+  if (alertFeedStatus.value === 'error') return 'danger'
+  if (alertFeedStatus.value === 'loading') return 'info'
+  if (alertFeedStatus.value === 'empty') return 'warning'
+  return 'success'
+})
+
+function formatCount(value: number | null | undefined): string | number {
+  return value ?? '无数据'
+}
+
+function formatPercent(value: number | null | undefined): string {
+  return value == null ? '无数据' : `${value}%`
+}
+
+function getAlertTagType(value: RealtimeAlertFeedVO['tagType']): DashboardTagType {
+  if (value === 'danger' || value === 'warning' || value === 'info') return value
+  return 'info'
+}
+
+function chartStateMessage(hasData: boolean, label: string): string {
+  if (chartsStatus.value === 'loading') return '正在加载图表数据…'
+  if (chartsStatus.value === 'error') return `图表数据加载失败：${chartsError.value}`
+  return hasData ? '' : `暂无${label}数据`
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '请求失败，请稍后重试'
+}
+
+function hasSummaryData(data: DashboardSummaryVO): boolean {
+  return Object.values(data).some(value => value != null)
+}
+
+function hasChartsData(data: DashboardChartsVO | null): boolean {
+  const trend = data?.workOrderTrend
+  return Boolean(
+    hasPositiveCount(data?.diseaseDistribution?.map(item => item.value)) ||
+    hasPositiveCount(data?.serviceStructure?.map(item => item.orderCount)) ||
+    (trend?.dateList?.length && (
+      hasPositiveCount(trend.dispatchedCounts) ||
+      hasPositiveCount(trend.closedCounts)
+    )),
+  )
+}
 
 function initCharts() {
   // 1. 慢病画像分布图
@@ -236,13 +328,7 @@ function initCharts() {
               formatter: '{b}\n{d}%'
             }
           },
-          data: [
-            { value: 544, name: '原发性高血压 (42.5%)' },
-            { value: 362, name: '2型糖尿病 (28.3%)' },
-            { value: 195, name: '冠状动脉硬化 (15.2%)' },
-            { value: 108, name: '退行性关节炎 (8.5%)' },
-            { value: 71, name: '慢性阻塞性肺病 (5.5%)' }
-          ]
+          data: []
         }
       ]
     })
@@ -272,12 +358,7 @@ function initCharts() {
           itemStyle: {
             borderRadius: 6
           },
-          data: [
-            { value: 68, name: '上门助浴照料 (38%)' },
-            { value: 47, name: '居家适老保洁 (26%)' },
-            { value: 38, name: '社区助餐配送 (21%)' },
-            { value: 27, name: '就医陪诊引导 (15%)' }
-          ]
+          data: []
         }
       ]
     })
@@ -306,7 +387,7 @@ function initCharts() {
       xAxis: [
         {
           type: 'category',
-          data: ['10-19', '10-20', '10-21', '10-22', '10-23', '10-24', '10-25 (今日)'],
+          data: [],
           axisPointer: { type: 'shadow' }
         }
       ],
@@ -334,14 +415,14 @@ function initCharts() {
           type: 'bar',
           barWidth: 14,
           itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
-          data: [18, 22, 19, 25, 28, 24, 26]
+          data: []
         },
         {
           name: '完工结案数',
           type: 'bar',
           barWidth: 14,
           itemStyle: { color: '#10b981', borderRadius: [4, 4, 0, 0] },
-          data: [17, 21, 19, 24, 27, 23, 25]
+          data: []
         },
         {
           name: '平均响应时长(分)',
@@ -350,77 +431,88 @@ function initCharts() {
           smooth: true,
           itemStyle: { color: '#f59e0b' },
           lineStyle: { width: 3 },
-          data: [25, 23, 21, 19, 17, 18, 16.5]
+          data: []
         }
       ]
     })
   }
 }
 
-function updateCharts(chartsData: any) {
-  if (diseaseChart && chartsData.diseaseDistribution) {
-    const pieData = chartsData.diseaseDistribution.map((item: any) => ({
-      value: item.count,
-      name: item.diseaseName
-    }))
-    diseaseChart.setOption({
-      series: [{ data: pieData }]
-    })
-  }
+function updateCharts(data: DashboardChartsVO | null) {
+  const diseaseData = (data?.diseaseDistribution ?? []).map(item => ({ value: item.value, name: item.name || '未分类' }))
+  const serviceData = (data?.serviceStructure ?? []).map(item => ({ value: item.orderCount, name: item.serviceName || '服务类型未提供' }))
+  const trend = data?.workOrderTrend
 
-  if (servicePieChart && chartsData.serviceStructure) {
-    const serviceData = chartsData.serviceStructure.map((item: any) => ({
-      value: item.count,
-      name: item.serviceName
-    }))
-    servicePieChart.setOption({
-      series: [{ data: serviceData }]
-    })
-  }
-
-  if (workOrderTrendChart && chartsData.workOrderTrend) {
-    workOrderTrendChart.setOption({
-      xAxis: { data: chartsData.workOrderTrend.dates || [] },
-      series: [
-        { data: chartsData.workOrderTrend.dispatchedOrders || [] },
-        { data: chartsData.workOrderTrend.closedOrders || [] },
-        { data: chartsData.workOrderTrend.averageLatencyMinutes || [] }
-      ]
-    })
-  }
+  diseaseChart?.setOption({ series: [{ data: diseaseData }] })
+  servicePieChart?.setOption({ series: [{ data: serviceData }] })
+  workOrderTrendChart?.setOption({
+    xAxis: { data: trend?.dateList ?? [] },
+    series: [
+      { data: trend?.dispatchedCounts ?? [] },
+      { data: trend?.closedCounts ?? [] },
+      { data: trend?.avgResponseMinutes ?? [] },
+    ],
+  })
 }
 
-async function loadDashboardData() {
-  try {
-    const summaryRes = await adminApi.getDashboardSummary()
-    if (summaryRes?.data) {
-      Object.assign(summaryData, summaryRes.data)
-    }
+async function loadDashboardData(): Promise<boolean | null> {
+  const requestSequence = ++dashboardRequestSequence
+  summaryStatus.value = 'loading'
+  chartsStatus.value = 'loading'
+  alertFeedStatus.value = 'loading'
+  summaryError.value = ''
+  chartsError.value = ''
+  alertFeedError.value = ''
 
-    const chartsRes = await adminApi.getDashboardCharts(selectedPeriod.value)
-    if (chartsRes?.data) {
-      updateCharts(chartsRes.data)
-    }
+  const [summaryResult, chartsResult, alertsResult] = await Promise.allSettled([
+    adminApi.getDashboardSummary(),
+    adminApi.getDashboardCharts(),
+    adminApi.getDashboardRealtimeAlerts(10),
+  ] as const)
+  if (requestSequence !== dashboardRequestSequence) return null
 
-    const alertsRes = await adminApi.getDashboardRealtimeAlerts(10)
-    if (alertsRes?.data && Array.isArray(alertsRes.data)) {
-      alertFeed.value = alertsRes.data.map((item: any) => ({
-        id: item.alertId,
-        time: item.time,
-        level: item.level,
-        tagType: item.tagType || (item.level === 'HIGH' ? 'danger' : 'warning'),
-        tagText: item.tagText || '预警',
-        elderName: item.elderName,
-        address: item.address,
-        description: item.description,
-        handler: item.handler,
-        status: item.status,
-        statusText: item.statusText
-      }))
-    }
-  } catch (err: any) {
-    // 若网络不可用时保留降级默认展示
+  let allRequestsSucceeded = true
+
+  if (summaryResult.status === 'fulfilled') {
+    const data = summaryResult.value.data
+    summaryData.value = data
+    summaryStatus.value = data && hasSummaryData(data) ? 'success' : 'empty'
+  } else {
+    summaryData.value = null
+    summaryStatus.value = 'error'
+    summaryError.value = errorMessage(summaryResult.reason)
+    allRequestsSucceeded = false
   }
+
+  if (chartsResult.status === 'fulfilled') {
+    const data = chartsResult.value.data
+    chartsData.value = data
+    updateCharts(data)
+    chartsStatus.value = hasChartsData(data) ? 'success' : 'empty'
+  } else {
+    chartsData.value = null
+    updateCharts(null)
+    chartsStatus.value = 'error'
+    chartsError.value = errorMessage(chartsResult.reason)
+    allRequestsSucceeded = false
+  }
+
+  if (alertsResult.status === 'fulfilled' && Array.isArray(alertsResult.value.data)) {
+    alertFeed.value = alertsResult.value.data
+    alertFeedStatus.value = alertFeed.value.length > 0 ? 'success' : 'empty'
+  } else if (alertsResult.status === 'fulfilled') {
+    alertFeed.value = []
+    alertFeedStatus.value = 'error'
+    alertFeedError.value = '服务端响应格式异常'
+    allRequestsSucceeded = false
+  } else {
+    alertFeed.value = []
+    alertFeedStatus.value = 'error'
+    alertFeedError.value = errorMessage(alertsResult.reason)
+    allRequestsSucceeded = false
+  }
+
+  return allRequestsSucceeded
 }
 
 function handleResize() {
@@ -430,9 +522,14 @@ function handleResize() {
 }
 
 async function refreshData() {
-  await loadDashboardData()
-  ElMessage.success('态势数据与 ECharts 图表已实时同步！')
+  const succeeded = await loadDashboardData()
+  if (succeeded === null) return
   handleResize()
+  if (succeeded) {
+    ElMessage.success('看板数据已更新')
+  } else {
+    ElMessage.warning('部分看板数据加载失败，请查看对应状态后重试')
+  }
 }
 
 function toggleFullscreen() {
@@ -493,6 +590,22 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.request-status,
+.feed-state {
+  padding: 10px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+}
+
+.request-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 /* KPI 卡片网格 */
@@ -629,6 +742,30 @@ onUnmounted(() => {
 .chart-box-large {
   width: 100%;
   height: 320px;
+}
+
+.chart-visual {
+  position: relative;
+}
+
+.chart-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #64748b;
+  font-size: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.feed-state {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  text-align: center;
 }
 
 /* 实时预警流水墙 */

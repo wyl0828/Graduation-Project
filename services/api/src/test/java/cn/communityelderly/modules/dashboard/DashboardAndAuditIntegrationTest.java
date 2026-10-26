@@ -56,8 +56,12 @@ class DashboardAndAuditIntegrationTest {
         assertTrue(summary.getTotalElders() >= 1L, "辖区在册长辈基线数应 >= 1");
         assertTrue(summary.getHighAgeAloneCount() >= 0, "高龄独居长辈数量应 >= 0");
         assertTrue(summary.getPendingAlertsCount() >= 0L, "待处置预警数应 >= 0");
-        assertTrue(summary.getWorkOrderFulfillmentRate() >= 0.0 && summary.getWorkOrderFulfillmentRate() <= 100.0, "工单履约率应在 0~100 之间");
-        assertTrue(summary.getMedicationComplianceRate() >= 0.0 && summary.getMedicationComplianceRate() <= 100.0, "用药合规率应在 0~100 之间");
+        assertTrue(summary.getWorkOrderFulfillmentRate() == null ||
+                        (summary.getWorkOrderFulfillmentRate() >= 0.0 && summary.getWorkOrderFulfillmentRate() <= 100.0),
+                "工单履约率无分母时应为空，否则应在 0~100 之间");
+        assertTrue(summary.getMedicationComplianceRate() == null ||
+                        (summary.getMedicationComplianceRate() >= 0.0 && summary.getMedicationComplianceRate() <= 100.0),
+                "用药合规率无分母时应为空，否则应在 0~100 之间");
         assertTrue(summary.getMonthlyClosedOrders() >= 0L, "当月办结工单数基线应 >= 0");
 
         // 2. 测试图表数据结构

@@ -554,7 +554,7 @@ async function handleInjectRecord() {
     ElMessage.warning('血压记录需要填写舒张压。')
     return
   }
-  if (!canOperate) {
+  if (!canOperate.value) {
     ElMessage.warning('请先读取当前老人和指标的服务端状态。')
     return
   }

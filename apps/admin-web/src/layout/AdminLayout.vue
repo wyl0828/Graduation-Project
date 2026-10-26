@@ -97,7 +97,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { User, Connection, DocumentChecked, Bell, Odometer, FirstAidKit, Tickets, Checked, DataAnalysis, Lock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -106,10 +106,16 @@ import { adminApi } from '../api/adminApi'
 const route = useRoute()
 const router = useRouter()
 const activeRoute = computed(() => route.path)
-const currentUser = computed(() => {
-  route.path
+type LayoutUser = { phone?: string; communityId?: string | number | null; currentRole?: string }
+
+function readCurrentUser(): LayoutUser | null {
   try { return JSON.parse(localStorage.getItem('user') || 'null') as { phone?: string; communityId?: string; currentRole?: string } | null }
   catch { return null }
+}
+
+const currentUser = ref<LayoutUser | null>(readCurrentUser())
+watch(() => route.fullPath, () => {
+  currentUser.value = readCurrentUser()
 })
 const isWorker = computed(() => currentUser.value?.currentRole === 'GRID_WORKER')
 
@@ -125,6 +131,7 @@ async function handleLogout() {
   localStorage.removeItem('token')
   localStorage.removeItem('activeRole')
   localStorage.removeItem('csrfToken')
+  currentUser.value = null
   router.push('/login')
 }
 </script>

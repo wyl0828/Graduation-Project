@@ -111,7 +111,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         }
         Long closedOrders = workOrderMapper.selectCount(closedOrderQuery);
 
-        double fulfillmentRate = 100.0;
+        Double fulfillmentRate = null;
         if (totalOrders != null && totalOrders > 0 && closedOrders != null) {
             fulfillmentRate = Math.round((closedOrders * 100.0 / totalOrders) * 10.0) / 10.0;
         }
@@ -138,7 +138,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
             confirmedTasksCount = confirmed != null ? confirmed : 0L;
         }
 
-        double medicationRate = 100.0;
+        Double medicationRate = null;
         if (todayTasksCount > 0) {
             medicationRate = Math.round((confirmedTasksCount * 100.0 / todayTasksCount) * 10.0) / 10.0;
         }

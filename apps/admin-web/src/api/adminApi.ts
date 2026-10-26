@@ -1,12 +1,89 @@
 import { http } from './http'
 
+export interface AdminLoginResponse {
+  userId: number
+  phone: string
+  csrfToken: string | null
+  activeRole?: string | null
+}
+
+export interface AdminCurrentUser {
+  userId: number
+  phone: string
+  communityId: string | number | null
+  currentRole: string
+}
+
+export interface CreateElderRequest {
+  name: string
+  sex: string
+  birthDate: string
+  address: string
+  contactPhone?: string
+  contactPhoneMissingReason?: string
+  emergencyContactName?: string
+  emergencyContactRelation?: string
+  emergencyContactPhone?: string
+  emergencyContactPhoneMissingReason?: string
+}
+
+export interface DashboardSummaryVO {
+  totalElders: number | null
+  highAgeAloneCount: number | null
+  pendingAlertsCount: number | null
+  workOrderFulfillmentRate: number | null
+  medicationComplianceRate: number | null
+  monthlyClosedOrders: number | null
+  todayConfirmedCheckins: number | null
+}
+
+export interface DiseaseDistributionVO {
+  name: string | null
+  value: number | null
+  percentage: number | null
+}
+
+export interface ServiceStructureVO {
+  serviceType: string | null
+  serviceName: string | null
+  orderCount: number | null
+  percentage: number | null
+}
+
+export interface WorkOrder7DayTrendVO {
+  dateList: string[] | null
+  dispatchedCounts: Array<number | null> | null
+  closedCounts: Array<number | null> | null
+  avgResponseMinutes: Array<number | null> | null
+}
+
+export interface DashboardChartsVO {
+  diseaseDistribution: DiseaseDistributionVO[] | null
+  serviceStructure: ServiceStructureVO[] | null
+  workOrderTrend: WorkOrder7DayTrendVO | null
+}
+
+export interface RealtimeAlertFeedVO {
+  alertId: number
+  time: string | null
+  level: string | null
+  tagType: 'danger' | 'warning' | 'info' | null
+  tagText: string | null
+  elderName: string | null
+  address: string | null
+  description: string | null
+  handler: string | null
+  status: string | null
+  statusText: string | null
+}
+
 export const adminApi = {
   // M01 认证
   login(phone: string, password: string) {
-    return http.post('/auth/login', { phone, password, clientType: 'WEB' })
+    return http.post<AdminLoginResponse>('/auth/login', { phone, password, clientType: 'WEB' })
   },
   getCurrentUser() {
-    return http.get('/auth/current-user')
+    return http.get<AdminCurrentUser>('/auth/current-user')
   },
   logout() {
     return http.post('/auth/logout')
@@ -26,7 +103,7 @@ export const adminApi = {
   getElderDetail(elderId: number) {
     return http.get(`/elder/archives/${elderId}`)
   },
-  createElder(data: any) {
+  createElder(data: CreateElderRequest) {
     return http.post('/elder/archives', data)
   },
   issueActivationCode(elderId: number, data?: { issueMode?: string; specialReason?: string; proxyBasisType?: string }) {
@@ -93,13 +170,13 @@ export const adminApi = {
 
   // M09 社区态势感知大屏
   getDashboardSummary() {
-    return http.get('/dashboard/community/summary')
+    return http.get<DashboardSummaryVO>('/dashboard/community/summary')
   },
-  getDashboardCharts(period = '7d') {
-    return http.get(`/dashboard/community/charts?period=${period}`)
+  getDashboardCharts(period = '7D') {
+    return http.get<DashboardChartsVO>(`/dashboard/community/charts?period=${period}`)
   },
   getDashboardRealtimeAlerts(limit = 10) {
-    return http.get(`/dashboard/community/realtime-alerts?limit=${limit}`)
+    return http.get<RealtimeAlertFeedVO[]>(`/dashboard/community/alerts-feed?limit=${limit}`)
   },
 
   // M06 / M07 工单调度与履约

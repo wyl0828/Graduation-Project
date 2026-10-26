@@ -13,6 +13,10 @@
       <text class="guardian-tip">紧急联系人：{{ emergencyContactName || '未填写' }} {{ emergencyContactRelation }} {{ emergencyContactPhone }}</text>
     </view>
 
+    <button class="logout-button" :disabled="logoutInProgress" @tap="handleLogout">
+      {{ logoutInProgress ? '正在退出…' : '退出登录' }}
+    </button>
+
     <!-- 健康状态速报卡片 -->
     <view class="health-card" :class="{ 'warning-border': isHealthAbnormal }">
       <view class="card-head">
@@ -150,6 +154,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { elderApi } from '../../api/elderApi'
+import { logoutCurrentSession } from '../../state/authSession'
 
 const currentDateStr = ref(new Date().toLocaleDateString('zh-CN'))
 const elderId = ref<number | null>(null)
@@ -173,6 +178,36 @@ const isPressing = ref(false)
 const pressProgress = ref(0) // 0 ~ 100
 const triggeredTime = ref('')
 const showCancelConfirmModal = ref(false)
+const logoutInProgress = ref(false)
+
+function handleLogout(): void {
+  if (logoutInProgress.value) return
+  logoutInProgress.value = true
+  uni.showModal({
+    title: '退出登录',
+    content: '确认退出当前账号并切换账号吗？',
+    confirmText: '退出登录',
+    cancelText: '继续使用',
+    success: async (result) => {
+      if (!result.confirm) {
+        logoutInProgress.value = false
+        return
+      }
+
+      try {
+        await logoutCurrentSession()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '退出登录失败'
+        uni.showToast({ title: `${message}，请重试`, icon: 'none', duration: 3000 })
+        logoutInProgress.value = false
+      }
+    },
+    fail: () => {
+      logoutInProgress.value = false
+      uni.showToast({ title: '无法打开退出确认框，请重试', icon: 'none', duration: 3000 })
+    },
+  })
+}
 
 // 环形进度条样式 (采用 CSS conic-gradient 兼容小程序全环境)
 const progressRingStyle = computed(() => {
@@ -400,6 +435,24 @@ const handleGoMedicationBox = () => {
   padding: 32rpx;
   box-sizing: border-box;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+.logout-button {
+  width: 100%;
+  max-width: 640rpx;
+  min-height: 72rpx;
+  margin: 0 auto 24rpx;
+  border: 2rpx solid #B91C1C;
+  border-radius: 16rpx;
+  background: #FFFFFF;
+  color: #991B1B;
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.logout-button[disabled] {
+  opacity: 0.65;
 }
 
 /* 顶部状态卡片 */

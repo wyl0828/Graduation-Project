@@ -1,5 +1,11 @@
 <template>
   <view class="dashboard-page">
+    <view class="session-actions">
+      <button class="logout-button" :disabled="logoutInProgress" @tap="handleLogout">
+        {{ logoutInProgress ? '正在退出…' : '退出登录' }}
+      </button>
+    </view>
+
     <view v-if="familyState.loading" class="state-card centered">
       <text class="state-title">正在读取亲情关系…</text>
     </view>
@@ -129,12 +135,43 @@ import { onShow } from '@dcloudio/uni-app'
 import ElderContextSwitcher from '../../components/family/ElderContextSwitcher.vue'
 import { elderApi } from '../../api/elderApi'
 import { elderContext, type BoundElder, type KinshipStatus } from '../../state/elderContext'
+import { logoutCurrentSession } from '../../state/authSession'
 
 const familyState = elderContext.state
 const activeElders = elderContext.activeElders
 const currentElder = elderContext.selectedElder
 const unlinking = ref(false)
+const logoutInProgress = ref(false)
 const isLoginExpired = computed(() => familyState.errorMessage.includes('登录状态已失效'))
+
+function handleLogout(): void {
+  if (logoutInProgress.value) return
+  logoutInProgress.value = true
+  uni.showModal({
+    title: '退出登录',
+    content: '确认退出当前账号并切换账号吗？',
+    confirmText: '退出登录',
+    cancelText: '继续使用',
+    success: async (result) => {
+      if (!result.confirm) {
+        logoutInProgress.value = false
+        return
+      }
+
+      try {
+        await logoutCurrentSession()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '退出登录失败'
+        uni.showToast({ title: `${message}，请重试`, icon: 'none', duration: 3000 })
+        logoutInProgress.value = false
+      }
+    },
+    fail: () => {
+      logoutInProgress.value = false
+      uni.showToast({ title: '无法打开退出确认框，请重试', icon: 'none', duration: 3000 })
+    },
+  })
+}
 
 onShow(() => {
   void refreshRelationships()
@@ -207,6 +244,9 @@ function handleUnbind() {
 
 <style lang="scss" scoped>
 .dashboard-page { min-height: 100vh; background: #f8fafc; display: flex; flex-direction: column; }
+.session-actions { display: flex; justify-content: flex-end; padding: 8px 16px 0; }
+.logout-button { min-width: 120px; min-height: 44px; border: 1px solid #b91c1c; border-radius: 10px; background: #fff; color: #991b1b; font-size: 15px; font-weight: 700; }
+.logout-button[disabled] { opacity: 0.65; }
 .main-scroll { flex: 1; padding: 16px; box-sizing: border-box; }
 .state-card, .relation-card, .elder-summary-card, .feature-card, .manage-box { background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06); }
 .state-card { margin: 16px; }

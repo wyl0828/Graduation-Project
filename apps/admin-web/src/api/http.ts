@@ -1,4 +1,4 @@
-export interface ApiResponse<T = any> {
+export interface ApiResponse<T = unknown> {
   code: string
   message: string
   data: T
@@ -14,7 +14,7 @@ export interface ApiError extends Error {
 class HttpClient {
   private baseUrl = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
-  async request<T = any>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+  async request<T = unknown>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`
     const headers = new Headers(options.headers || {})
 
@@ -60,11 +60,11 @@ class HttpClient {
     return result
   }
 
-  get<T = any>(endpoint: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+  get<T = unknown>(endpoint: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, { method: 'GET', headers })
   }
 
-  post<T = any>(endpoint: string, body?: any, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+  post<T = unknown>(endpoint: string, body?: unknown, headers?: Record<string, string>): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, {
       method: 'POST',
       headers,
@@ -72,7 +72,7 @@ class HttpClient {
     })
   }
 
-  put<T = any>(endpoint: string, body?: any, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+  put<T = unknown>(endpoint: string, body?: unknown, headers?: Record<string, string>): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, {
       method: 'PUT',
       headers,
@@ -80,7 +80,7 @@ class HttpClient {
     })
   }
 
-  delete<T = any>(endpoint: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
+  delete<T = unknown>(endpoint: string, headers?: Record<string, string>): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, { method: 'DELETE', headers })
   }
 }

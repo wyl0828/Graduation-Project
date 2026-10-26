@@ -59,6 +59,10 @@ $script:checks = [ordered]@{
     '子女读回预约 COMPLETED 与关联工单 CLOSED' = '未执行'
     '老人触发 SOS 并原子生成求助工单' = '未执行'
     '管理员派发并处置 SOS 后求助与工单均 CLOSED' = '未执行'
+    '老人注销成功并撤销服务端会话' = '未执行'
+    '老人注销后的旧 Bearer Token 请求返回 HTTP 401' = '未执行'
+    '子女注销成功并撤销服务端会话' = '未执行'
+    '子女注销后的旧 Bearer Token 请求返回 HTTP 401' = '未执行'
     'HTTP 冒烟结束后 API 已停止且端口释放，才运行完整 Maven 测试' = '未执行'
     'Maven 全套结束后 API 在隔离端口重新健康可用' = '未执行'
     '临时数据库上的完整 Maven 测试套件通过' = '未执行'
@@ -920,6 +924,24 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
         ($closedSos.Count -eq 1 -and [string]$closedSos[0].workOrderId -eq [string]$sosWorkOrderId -and
             [string]$sosOrderReadJson.data.status -eq 'CLOSED' -and [string]$sosOrderReadJson.data.sourceType -eq 'SOS') `
         'POST /api/v1/emergency/sos/{id}/dispatch or /close did not leave both the SOS and generated work order closed.'
+
+    # Keep logout checks after all elder/child business assertions so their
+    # tokens remain available for the complete isolated business flow above.
+    $elderLogoutResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/logout' -BearerToken $elderAccount.Token
+    $null = Assert-OkApiResponse $elderLogoutResponse 'Elder logout'
+    Confirm-Chain '老人注销成功并撤销服务端会话' ($elderLogoutResponse.StatusCode -eq 200) `
+        'POST /api/v1/auth/logout did not return HTTP 200 for the active elder session.'
+    $elderOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $elderAccount.Token
+    Confirm-Chain '老人注销后的旧 Bearer Token 请求返回 HTTP 401' ($elderOldTokenResponse.StatusCode -eq 401) `
+        'The elder Bearer Token remained valid after logout.'
+
+    $childLogoutResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/logout' -BearerToken $childAccount.Token
+    $null = Assert-OkApiResponse $childLogoutResponse 'Child logout'
+    Confirm-Chain '子女注销成功并撤销服务端会话' ($childLogoutResponse.StatusCode -eq 200) `
+        'POST /api/v1/auth/logout did not return HTTP 200 for the active child session.'
+    $childOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $childAccount.Token
+    Confirm-Chain '子女注销后的旧 Bearer Token 请求返回 HTTP 401' ($childOldTokenResponse.StatusCode -eq 401) `
+        'The child Bearer Token remained valid after logout.'
 
     $script:httpSmokeResult = '通过'
 

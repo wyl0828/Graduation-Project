@@ -231,7 +231,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type UploadRequestOptions } from 'element-plus'
 import type { ApiError } from '../../api/http'
 import { adminApi } from '../../api/adminApi'
 
@@ -454,7 +454,17 @@ function normalizeUploadError(error: unknown) {
   return error instanceof Error ? error : new Error('照片上传失败。')
 }
 
-async function handleCustomUpload(options: any) {
+function toUploadAjaxError(error: Error) {
+  const status = (error as ApiError).status ?? 0
+  return Object.assign(error, {
+    name: 'UploadAjaxError',
+    status,
+    method: 'POST',
+    url: `${import.meta.env.VITE_API_BASE_URL || '/api/v1'}/files/upload`,
+  })
+}
+
+async function handleCustomUpload(options: UploadRequestOptions) {
   const file = options?.file as File & { uid?: number | string }
   const uid = file?.uid
   uploadingCount.value += 1
@@ -479,7 +489,7 @@ async function handleCustomUpload(options: any) {
     const uploadError = normalizeUploadError(error)
     uploadedPhotoUrls.value = uploadedPhotoUrls.value.filter(url => url !== uploadedFileList.value.find(item => item.uid === uid)?.url)
     uploadedFileList.value = uploadedFileList.value.filter(item => item.uid !== uid)
-    options.onError(uploadError)
+    options.onError(toUploadAjaxError(uploadError))
     ElMessage.error(apiErrorMessage(uploadError))
   } finally {
     uploadingCount.value = Math.max(0, uploadingCount.value - 1)

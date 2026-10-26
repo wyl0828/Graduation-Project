@@ -1,4 +1,4 @@
-import { uniHttp } from './http'
+import { uniHttp, type ApiResponse } from './http'
 
 export const elderApi = {
   // M01 认证
@@ -10,6 +10,9 @@ export const elderApi = {
   },
   getCurrentUser() {
     return uniHttp.get('/auth/current-user')
+  },
+  logout(): Promise<ApiResponse<void>> {
+    return uniHttp.post<void>('/auth/logout')
   },
   switchRole(targetRoleCode: string) {
     return uniHttp.post('/auth/switch-role', { targetRoleCode })

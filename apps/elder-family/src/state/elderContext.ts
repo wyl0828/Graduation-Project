@@ -30,6 +30,7 @@ const activeElders = computed(() => context.elders.filter(elder => elder.status 
 const selectedElder = computed(() =>
   activeElders.value.find(elder => elder.elderId === context.selectedElderId) ?? null
 )
+let refreshGeneration = 0
 
 function errorMessageFor(error: unknown): string {
   const apiError = error as { message?: string; code?: string; statusCode?: number }
@@ -46,10 +47,12 @@ function errorMessageFor(error: unknown): string {
 }
 
 async function refreshElders(): Promise<boolean> {
+  const generation = refreshGeneration
   context.loading = true
   context.errorMessage = ''
   try {
     const response = await elderApi.getMyBoundElders()
+    if (generation !== refreshGeneration) return false
     if (!Array.isArray(response.data)) {
       throw new Error('亲情关系接口返回格式异常，请稍后重试。')
     }
@@ -61,6 +64,7 @@ async function refreshElders(): Promise<boolean> {
     context.loaded = true
     return true
   } catch (error) {
+    if (generation !== refreshGeneration) return false
     // Do not keep showing an older elder or an old successful relationship list after a failed refresh.
     context.elders = []
     context.selectedElderId = null
@@ -68,8 +72,17 @@ async function refreshElders(): Promise<boolean> {
     context.errorMessage = errorMessageFor(error)
     return false
   } finally {
-    context.loading = false
+    if (generation === refreshGeneration) context.loading = false
   }
+}
+
+function clearContext(): void {
+  refreshGeneration += 1
+  context.elders = []
+  context.selectedElderId = null
+  context.loading = false
+  context.loaded = false
+  context.errorMessage = ''
 }
 
 function selectActiveElder(elderId: number): boolean {
@@ -84,6 +97,7 @@ export const elderContext = {
   activeElders,
   selectedElder,
   refresh: refreshElders,
+  clear: clearContext,
   select: selectActiveElder,
   getErrorMessage: errorMessageFor,
 }

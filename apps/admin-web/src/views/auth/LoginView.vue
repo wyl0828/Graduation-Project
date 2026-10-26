@@ -103,8 +103,8 @@ async function handleLogin() {
       } else {
         ElMessage.error(res.message || '登录响应缺少会话校验信息')
       }
-    } catch (err: any) {
-      ElMessage.error(err.message || '登录失败，请检查账号密码')
+    } catch (error: unknown) {
+      ElMessage.error(error instanceof Error ? error.message : '登录失败，请检查账号密码')
     } finally {
       loading.value = false
     }
