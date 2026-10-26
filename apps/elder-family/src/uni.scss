@@ -1,19 +1,8 @@
 /**
  * 这里是uni-app内置的常用样式变量
- *
- * uni-app 官方扩展插件及插件市场（https://ext.dcloud.net.cn）上很多三方插件均使用了这些样式变量
- * 如果你是插件开发者，建议你使用scss预处理，并在插件代码中直接使用这些变量（无需 import 这个文件），方便用户通过搭积木的方式开发整体风格一致的App
- *
- */
-
-/**
- * 如果你是App开发者（插件使用者），你可以通过修改这些变量来定制自己的插件主题，实现自定义主题功能
- *
- * 如果你的项目同样使用了scss预处理，你也可以直接在你的 scss 代码中使用如下变量，同时无需 import 这个文件
  */
 
 /* 颜色变量 */
-
 /* 行为相关颜色 */
 $uni-color-primary: #007aff;
 $uni-color-success: #4cd964;
@@ -37,11 +26,10 @@ $uni-bg-color-mask: rgba(0, 0, 0, 0.4); // 遮罩颜色
 $uni-border-color: #c8c7cc;
 
 /* 尺寸变量 */
-
 /* 文字尺寸 */
 $uni-font-size-sm: 12px;
 $uni-font-size-base: 14px;
-$uni-font-size-lg: 16;
+$uni-font-size-lg: 16px;
 
 /* 图片尺寸 */
 $uni-img-size-sm: 20px;
@@ -74,3 +62,44 @@ $uni-color-subtitle: #555; // 二级标题颜色
 $uni-font-size-subtitle: 18px;
 $uni-color-paragraph: #3f536e; // 文章段落颜色
 $uni-font-size-paragraph: 15px;
+
+/* ================= 适老化与高颜值设计规范 (M01/M02 Design Tokens) ================= */
+// 1. 色彩系统
+$elder-bg: #FAF8F5;                  // 页面全局背景：温暖护眼米白
+$elder-card-bg: #FFFFFF;             // 卡片背景：纯净白底
+$elder-primary: #EA580C;             // 长辈端主色调：温暖活力橙
+$elder-gradient-start: #F97316;      // 按钮渐变起点
+$elder-gradient-end: #EA580C;        // 按钮渐变终点
+$elder-primary-soft: #FFF7ED;       // 极浅橙底
+$elder-text-main: #1C1917;           // 高对比度深炭黑正文
+$elder-text-sub: #78716C;            // 辅助次要文字
+$elder-text-muted: #A8A29E;          // 提示与占位文字
+
+$family-primary: #0284C7;            // 子女端主色调：安心医疗青蓝
+$family-primary-soft: #F0F9FF;       // 子女端浅底
+$family-primary-dark: #0369A1;       // 子女端深青蓝
+
+$alert-warning-bg: #FEF3C7;          // 争议冻结/待审警示背景：琥珀黄
+$alert-warning-text: #92400E;        // 争议冻结深褐黄文字
+$alert-warning-border: #F59E0B;      // 争议冻结警示边框
+$alert-danger-bg: #FEE2E2;           // 严重错误/锁死红底
+$alert-danger-text: #991B1B;         // 严重错误深红字
+$alert-danger-border: #EF4444;       // 严重错误红边框
+$alert-success-bg: #DCFCE7;          // 成功浅绿底
+$alert-success-text: #166534;        // 成功深绿字
+
+// 2. 适老化排版与尺寸
+$elder-font-headline: 24px;          // 一级大标题 (>=22px)
+$elder-font-title: 22px;             // 模块标题 (>=20px)
+$elder-font-body: 18px;              // 正文基准字号 (>=18px 适老底线)
+$elder-font-sub: 16px;               // 次要说明字号
+$elder-font-caption: 14px;           // 极小标签字号
+
+$elder-btn-height: 52px;             // 主要按钮高度 (>=52px)
+$elder-touch-target: 48px;           // 最小适老触控区 (>=48x48px)
+$elder-keypad-btn-height: 60px;      // 自定义大数字键盘单键高度 (>=60px)
+
+// 3. 适老化圆角与投影
+$card-radius: 18px;                  // 大卡片圆角 (16px~20px)
+$card-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); // 柔和弥散阴影
+$card-shadow-active: 0 8px 24px rgba(234, 88, 12, 0.15); // 橙色激活发光阴影
