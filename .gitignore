@@ -5,6 +5,7 @@
 
 # Local runtime data and uploaded files
 .local-data/
+.playwright-cli/
 *.log
 
 # Java and Maven
