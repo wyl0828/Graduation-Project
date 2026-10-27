@@ -20,7 +20,7 @@
         <el-form-item prop="phone">
           <el-input
             v-model="form.phone"
-            placeholder="管理员 / 网格员手机号"
+            placeholder="管理员 / 网格员 / 护工手机号"
             prefix-icon="User"
             clearable
           />
@@ -94,12 +94,12 @@ async function handleLogin() {
           localStorage.setItem('activeRole', data.activeRole)
         }
         const current = await adminApi.getCurrentUser()
-        if (!current.data || !['COMMUNITY_ADMIN', 'GRID_WORKER'].includes(current.data.currentRole)) {
+        if (!current.data || !['COMMUNITY_ADMIN', 'GRID_WORKER', 'CARE_WORKER'].includes(current.data.currentRole)) {
           throw new Error('当前账号没有管理端可用角色')
         }
         localStorage.setItem('user', JSON.stringify(current.data))
         ElMessage.success('登录成功')
-        router.push(current.data.currentRole === 'GRID_WORKER' ? '/order/execution-review' : '/dashboard/community')
+        router.push(['GRID_WORKER', 'CARE_WORKER'].includes(current.data.currentRole) ? '/order/execution-review' : '/dashboard/community')
       } else {
         ElMessage.error(res.message || '登录响应缺少会话校验信息')
       }

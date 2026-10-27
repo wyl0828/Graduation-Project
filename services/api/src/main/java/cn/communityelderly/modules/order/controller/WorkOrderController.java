@@ -32,14 +32,14 @@ public class WorkOrderController {
     }
 
     @GetMapping("/my-tasks")
-    @RequireRoles({"GRID_WORKER"})
+    @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<List<WorkOrderVO>> getMyTasks(@RequestParam(required = false) String status) {
         CurrentUser user = UserContext.requireCurrentUser();
         return Result.success(workOrderService.getMyTasks(Long.parseLong(user.getUserId()), status));
     }
 
     @GetMapping("/{workOrderId}")
-    @RequireRoles({"COMMUNITY_ADMIN", "GRID_WORKER", "CHILD", "ELDER"})
+    @RequireRoles({"COMMUNITY_ADMIN", "GRID_WORKER", "CARE_WORKER", "CHILD", "ELDER"})
     public Result<WorkOrderVO> getOrderDetail(@PathVariable Long workOrderId) {
         return Result.success(workOrderService.getOrderDetail(workOrderId));
     }
@@ -54,7 +54,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/accept")
-    @RequireRoles({"GRID_WORKER"})
+    @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> acceptOrder(@PathVariable Long workOrderId) {
         CurrentUser user = UserContext.requireCurrentUser();
         workOrderService.acceptOrder(workOrderId, Long.parseLong(user.getUserId()));
@@ -71,7 +71,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/start")
-    @RequireRoles({"GRID_WORKER"})
+    @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> startService(@PathVariable Long workOrderId) {
         CurrentUser user = UserContext.requireCurrentUser();
         workOrderService.startService(workOrderId, Long.parseLong(user.getUserId()));

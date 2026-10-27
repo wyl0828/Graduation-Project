@@ -43,6 +43,9 @@ import java.util.UUID;
 @Service
 public class WorkOrderServiceImpl implements WorkOrderService {
 
+    private static final List<String> CARE_WORKER_TERMINAL_STATUSES = List.of(
+            "CLOSED", "VOIDED", "TERMINATED_PRE_ACCEPTANCE", "SERVICE_STOPPED");
+
     private final WorkOrderMapper workOrderMapper;
     private final WorkOrderAssignmentHistoryMapper assignmentHistoryMapper;
     private final WorkOrderActionHistoryMapper actionHistoryMapper;
@@ -105,8 +108,31 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
     @Override
     public List<WorkOrderVO> getMyTasks(Long workerUserId, String status) {
-        authorizationPolicy.requireRole("GRID_WORKER");
         CurrentUser current = authorizationPolicy.requireCurrentUser();
+        if (isCurrentRole(current, "CARE_WORKER")) {
+            CareWorkerScope scope = requireCareWorkerScope(workerUserId);
+            LambdaQueryWrapper<WorkOrder> query = new LambdaQueryWrapper<WorkOrder>()
+                    .eq(WorkOrder::getCurrentAssigneeId, scope.userId)
+                    .eq(WorkOrder::getCommunityId, scope.communityId)
+                    .notIn(WorkOrder::getStatus, CARE_WORKER_TERMINAL_STATUSES);
+            if (StringUtils.hasText(status)) {
+                query.eq(WorkOrder::getStatus, status);
+            }
+            query.orderByDesc(WorkOrder::getCreatedAt);
+
+            List<WorkOrder> list = workOrderMapper.selectList(query);
+            List<WorkOrderVO> result = new ArrayList<>();
+            for (WorkOrder order : list) {
+                if (isCareWorkerTerminalOrder(order)) {
+                    continue;
+                }
+                ElderProfile elder = requireCareWorkerOrder(order, scope);
+                result.add(convertToCareWorkerVO(order, elder));
+            }
+            return result;
+        }
+
+        authorizationPolicy.requireRole("GRID_WORKER");
         Long selfId = currentUserId(current);
         if (workerUserId != null && !workerUserId.equals(selfId)) {
             throw new BusinessException(ErrorCode.ACCESS_DENIED, "只能查看本人的待办工单");
@@ -134,6 +160,17 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
     @Override
     public WorkOrderVO getOrderDetail(Long workOrderId) {
+        CurrentUser current = authorizationPolicy.requireCurrentUser();
+        if (isCurrentRole(current, "CARE_WORKER")) {
+            CareWorkerScope scope = requireCareWorkerScope(null);
+            WorkOrder careOrder = workOrderMapper.selectById(workOrderId);
+            if (careOrder == null) {
+                throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "指定的工单不存在");
+            }
+            ElderProfile elder = requireCareWorkerOrder(careOrder, scope);
+            return convertToCareWorkerVO(careOrder, elder);
+        }
+
         WorkOrder order = workOrderMapper.selectById(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "指定的工单不存在");
@@ -155,15 +192,15 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         assertStatus(order, "PENDING_DISPATCH", "DISPATCHED");
 
         UserAccount assignee = userAccountMapper.selectById(dto.getAssigneeUserId());
-        UserRole assignment = userRoleMapper.selectOne(new LambdaQueryWrapper<UserRole>()
-                .eq(UserRole::getUserId, dto.getAssigneeUserId())
-                .eq(UserRole::getRoleCode, "GRID_WORKER")
-                .eq(UserRole::getCommunityId, elder.getCommunityId())
-                .eq(UserRole::getStatus, "ACTIVE")
-                .last("LIMIT 1"));
+        UserRole assignment = findActiveDispatchAssignment(dto.getAssigneeUserId(), elder.getCommunityId(), "GRID_WORKER");
+        if (assignment == null) {
+            assignment = findActiveDispatchAssignment(dto.getAssigneeUserId(), elder.getCommunityId(), "CARE_WORKER");
+        }
         if (assignee == null || !"ACTIVE".equalsIgnoreCase(assignee.getStatus())
-                || !"STAFF".equalsIgnoreCase(assignee.getAccountKind()) || assignment == null) {
-            throw new BusinessException(ErrorCode.USER_NOT_FOUND, "指派的目标网格工作人员不存在");
+                || !"STAFF".equalsIgnoreCase(assignee.getAccountKind())
+                || !dto.getAssigneeUserId().equals(assignee.getUserId())
+                || !isActiveDispatchAssignment(assignment, dto.getAssigneeUserId(), elder.getCommunityId())) {
+            throw new BusinessException(ErrorCode.USER_NOT_FOUND, "指派的目标工作人员不存在");
         }
 
         String actionType = order.getCurrentAssigneeId() == null ? "DISPATCH" : "REASSIGN";
@@ -191,12 +228,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     @Override
     @Transactional
     public void acceptOrder(Long workOrderId, Long workerUserId) {
-        requireCurrentActor(workerUserId, "GRID_WORKER");
+        WorkerActor actor = requireWorkerActor(workerUserId);
         WorkOrder order = workOrderMapper.selectById(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "工单不存在");
         }
-        requireOrderInCurrentCommunity(order, "GRID_WORKER");
+        requireWorkerOrderAccess(order, actor);
         assertStatus(order, "DISPATCHED");
         if (order.getCurrentAssigneeId() == null || !order.getCurrentAssigneeId().equals(workerUserId)) {
             throw new BusinessException(ErrorCode.FORBIDDEN_ACCESS, "您不是该工单的责任人，无权接单");
@@ -205,10 +242,10 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         String fromStatus = order.getStatus();
         order.setStatus("ACCEPTED");
         order.setAcceptTime(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        updateWorkOrderOrThrow(order);
 
-        recordActionHistory(workOrderId, workerUserId, "COMMUNITY_WORKER", fromStatus, "ACCEPTED",
-                "ACCEPT", "网格员已确认接单响应");
+        recordActionHistory(workOrderId, workerUserId, actor.historyRole, fromStatus, "ACCEPTED",
+                "ACCEPT", actor.careWorker ? "护工已确认接单响应" : "网格员已确认接单响应");
     }
 
     @Override
@@ -245,12 +282,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     @Override
     @Transactional
     public void startService(Long workOrderId, Long workerUserId) {
-        requireCurrentActor(workerUserId, "GRID_WORKER");
+        WorkerActor actor = requireWorkerActor(workerUserId);
         WorkOrder order = workOrderMapper.selectById(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "工单不存在");
         }
-        requireOrderInCurrentCommunity(order, "GRID_WORKER");
+        requireWorkerOrderAccess(order, actor);
         assertStatus(order, "ACCEPTED");
         if (order.getCurrentAssigneeId() == null || !order.getCurrentAssigneeId().equals(workerUserId)) {
             throw new BusinessException(ErrorCode.FORBIDDEN_ACCESS, "您不是该工单的责任人，无权开始服务");
@@ -259,21 +296,21 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         String fromStatus = order.getStatus();
         order.setStatus("PROCESSING");
         order.setServiceStartTime(LocalDateTime.now());
-        workOrderMapper.updateById(order);
+        updateWorkOrderOrThrow(order);
 
-        recordActionHistory(workOrderId, workerUserId, "COMMUNITY_WORKER", fromStatus, "PROCESSING",
-                "START_SERVICE", "工作人员已到达长辈现场并开始提供服务");
+        recordActionHistory(workOrderId, workerUserId, actor.historyRole, fromStatus, "PROCESSING",
+                "START_SERVICE", actor.careWorker ? "护工已到达长辈现场并开始提供服务" : "工作人员已到达长辈现场并开始提供服务");
     }
 
     @Override
     @Transactional
     public void submitExecutionResult(Long workOrderId, WorkOrderExecutionDTO dto, Long workerUserId) {
-        requireCurrentActor(workerUserId, "GRID_WORKER");
+        WorkerActor actor = requireWorkerActor(workerUserId);
         WorkOrder order = workOrderMapper.selectById(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "工单不存在");
         }
-        requireOrderInCurrentCommunity(order, "GRID_WORKER");
+        requireWorkerOrderAccess(order, actor);
         assertStatus(order, "PROCESSING");
         if (order.getCurrentAssigneeId() == null || !order.getCurrentAssigneeId().equals(workerUserId)) {
             throw new BusinessException(ErrorCode.FORBIDDEN_ACCESS, "您不是该工单的责任人，无权提交服务总结");
@@ -300,10 +337,23 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         order.setServiceFinishTime(LocalDateTime.now());
         order.setServiceResultSummary(dto.getResultSummary());
         order.setStatus("PENDING_RESULT_REVIEW");
-        workOrderMapper.updateById(order);
+        updateWorkOrderOrThrow(order);
 
-        recordActionHistory(workOrderId, workerUserId, "COMMUNITY_WORKER", fromStatus, "PENDING_RESULT_REVIEW",
+        recordActionHistory(workOrderId, workerUserId, actor.historyRole, fromStatus, "PENDING_RESULT_REVIEW",
                 "SUBMIT_RESULT", "服务人员已完成上门履约并提交结案凭据，等待社区复核");
+    }
+
+    @Override
+    public void assertCurrentCareWorkerMayUpload(Long workOrderId) {
+        CareWorkerScope scope = requireCareWorkerScope(null);
+        if (workOrderId == null || workOrderId <= 0) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        WorkOrder order = workOrderMapper.selectById(workOrderId);
+        if (order == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        requireCareWorkerOrder(order, scope);
     }
 
     @Override
@@ -424,6 +474,110 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         return currentUserId;
     }
 
+    private WorkerActor requireWorkerActor(Long suppliedUserId) {
+        CurrentUser current = authorizationPolicy.requireCurrentUser();
+        if (isCurrentRole(current, "CARE_WORKER")) {
+            return WorkerActor.forCareWorker(requireCareWorkerScope(suppliedUserId));
+        }
+        requireCurrentActor(suppliedUserId, "GRID_WORKER");
+        return WorkerActor.forGridWorker();
+    }
+
+    private CareWorkerScope requireCareWorkerScope(Long suppliedUserId) {
+        authorizationPolicy.requireRole("CARE_WORKER");
+        CurrentUser current = authorizationPolicy.requireCurrentUser();
+        Long currentId = currentUserId(current);
+        if (suppliedUserId != null && !suppliedUserId.equals(currentId)) {
+            throw new BusinessException(ErrorCode.ACCESS_DENIED, "只能操作本人的待办工单");
+        }
+        Long communityId = resolveSessionCommunityId();
+        if (!"STAFF".equalsIgnoreCase(current.getAccountKind())) {
+            throw careWorkerAccessDenied();
+        }
+
+        UserAccount account = userAccountMapper.selectById(currentId);
+        if (account == null || !"ACTIVE".equalsIgnoreCase(account.getStatus())
+                || !"STAFF".equalsIgnoreCase(account.getAccountKind())) {
+            throw careWorkerAccessDenied();
+        }
+
+        UserRole assignment = userRoleMapper.selectOne(new LambdaQueryWrapper<UserRole>()
+                .eq(UserRole::getUserId, currentId)
+                .eq(UserRole::getRoleCode, "CARE_WORKER")
+                .eq(UserRole::getCommunityId, communityId)
+                .eq(UserRole::getStatus, "ACTIVE")
+                .last("LIMIT 1"));
+        if (assignment == null || !currentId.equals(assignment.getUserId())
+                || !"CARE_WORKER".equalsIgnoreCase(assignment.getRoleCode())
+                || !communityId.equals(assignment.getCommunityId())
+                || !"ACTIVE".equalsIgnoreCase(assignment.getStatus())) {
+            throw careWorkerAccessDenied();
+        }
+        return new CareWorkerScope(currentId, communityId);
+    }
+
+    private void requireWorkerOrderAccess(WorkOrder order, WorkerActor actor) {
+        if (actor.careWorker) {
+            requireCareWorkerOrder(order, actor.careWorkerScope);
+        } else {
+            requireOrderInCurrentCommunity(order, "GRID_WORKER");
+        }
+    }
+
+    private void updateWorkOrderOrThrow(WorkOrder order) {
+        if (workOrderMapper.updateById(order) < 1) {
+            throw new BusinessException(ErrorCode.OPTIMISTIC_LOCK_CONFLICT,
+                    "工单已被其他操作更新，请刷新后重试");
+        }
+    }
+
+    private ElderProfile requireCareWorkerOrder(WorkOrder order, CareWorkerScope scope) {
+        if (order == null || isCareWorkerTerminalOrder(order) || order.getCurrentAssigneeId() == null
+                || !scope.userId.equals(order.getCurrentAssigneeId())
+                || order.getCommunityId() == null || !scope.communityId.equals(order.getCommunityId())) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        ElderProfile elder = elderProfileMapper.selectById(order.getElderId());
+        if (elder == null || elder.getCommunityId() == null
+                || !scope.communityId.equals(elder.getCommunityId())
+                || !order.getCommunityId().equals(elder.getCommunityId())) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        return elder;
+    }
+
+    private boolean isCareWorkerTerminalOrder(WorkOrder order) {
+        return order != null && StringUtils.hasText(order.getStatus())
+                && CARE_WORKER_TERMINAL_STATUSES.stream()
+                .anyMatch(status -> status.equalsIgnoreCase(order.getStatus()));
+    }
+
+    private BusinessException careWorkerAccessDenied() {
+        return new BusinessException(ErrorCode.ACCESS_DENIED, "当前护工账号或社区角色无效");
+    }
+
+    private boolean isActiveDispatchAssignment(UserRole assignment, Long userId, Long communityId) {
+        return assignment != null && userId != null && communityId != null
+                && userId.equals(assignment.getUserId())
+                && communityId.equals(assignment.getCommunityId())
+                && "ACTIVE".equalsIgnoreCase(assignment.getStatus())
+                && ("GRID_WORKER".equalsIgnoreCase(assignment.getRoleCode())
+                || "CARE_WORKER".equalsIgnoreCase(assignment.getRoleCode()));
+    }
+
+    private UserRole findActiveDispatchAssignment(Long userId, Long communityId, String roleCode) {
+        return userRoleMapper.selectOne(new LambdaQueryWrapper<UserRole>()
+                .eq(UserRole::getUserId, userId)
+                .eq(UserRole::getRoleCode, roleCode)
+                .eq(UserRole::getCommunityId, communityId)
+                .eq(UserRole::getStatus, "ACTIVE")
+                .last("LIMIT 1"));
+    }
+
+    private boolean isCurrentRole(CurrentUser user, String role) {
+        return user.getCurrentRole() != null && role.equalsIgnoreCase(user.getCurrentRole());
+    }
+
     private Long currentUserId(CurrentUser current) {
         try {
             return Long.parseLong(current.getUserId());
@@ -453,6 +607,35 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             result.add(convertToVO(o));
         }
         return result;
+    }
+
+    private WorkOrderVO convertToCareWorkerVO(WorkOrder order, ElderProfile elder) {
+        WorkOrderVO vo = new WorkOrderVO();
+        vo.setWorkOrderId(order.getWorkOrderId());
+        vo.setOrderNo(order.getOrderNo());
+        vo.setElderName(elder.getName());
+        vo.setElderAddress(elder.getAddress());
+        vo.setServiceType(order.getServiceType());
+        vo.setOrderTitle(order.getOrderTitle());
+        vo.setOrderDescription(order.getOrderDescription());
+        vo.setUrgencyLevel(order.getUrgencyLevel());
+        vo.setStatus(order.getStatus());
+        vo.setStatusName(formatOrderStatus(order.getStatus()));
+        vo.setDispatchTime(order.getDispatchTime());
+        vo.setAcceptTime(order.getAcceptTime());
+        vo.setServiceStartTime(order.getServiceStartTime());
+        vo.setServiceFinishTime(order.getServiceFinishTime());
+        vo.setServiceResultSummary(order.getServiceResultSummary());
+        vo.setResultPhotoRequired(order.getResultPhotoRequired());
+        vo.setPhotoExemptionReason(order.getPhotoExemptionReason());
+        if (StringUtils.hasText(order.getPhotoUrls())) {
+            vo.setPhotoUrls(Arrays.asList(order.getPhotoUrls().split(";")));
+        } else {
+            vo.setPhotoUrls(Collections.emptyList());
+        }
+        vo.setCreatedAt(order.getCreatedAt());
+        vo.setUpdatedAt(order.getUpdatedAt());
+        return vo;
     }
 
     private WorkOrderVO convertToVO(WorkOrder o) {
@@ -527,6 +710,36 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             case "CLOSED": return "已结案归档";
             case "VOIDED": return "已作废";
             default: return status;
+        }
+    }
+
+    private static final class CareWorkerScope {
+        private final Long userId;
+        private final Long communityId;
+
+        private CareWorkerScope(Long userId, Long communityId) {
+            this.userId = userId;
+            this.communityId = communityId;
+        }
+    }
+
+    private static final class WorkerActor {
+        private final boolean careWorker;
+        private final CareWorkerScope careWorkerScope;
+        private final String historyRole;
+
+        private WorkerActor(boolean careWorker, CareWorkerScope careWorkerScope, String historyRole) {
+            this.careWorker = careWorker;
+            this.careWorkerScope = careWorkerScope;
+            this.historyRole = historyRole;
+        }
+
+        private static WorkerActor forCareWorker(CareWorkerScope scope) {
+            return new WorkerActor(true, scope, "CARE_WORKER");
+        }
+
+        private static WorkerActor forGridWorker() {
+            return new WorkerActor(false, null, "COMMUNITY_WORKER");
         }
     }
 }

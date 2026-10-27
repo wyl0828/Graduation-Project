@@ -12,6 +12,7 @@ import WorkOrderDispatchView from '../views/order/WorkOrderDispatchView.vue'
 import WorkOrderExecutionView from '../views/order/WorkOrderExecutionView.vue'
 import CommunityDashboardView from '../views/dashboard/CommunityDashboardView.vue'
 import AuditLogView from '../views/audit/AuditLogView.vue'
+import StaffRoleManagementView from '../views/staff/StaffRoleManagementView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -82,6 +83,12 @@ const router = createRouter({
           meta: { title: '服务登记与真实性结案审核' }
         },
         {
+          path: '/staff/roles',
+          name: 'StaffRoleManagement',
+          component: StaffRoleManagementView,
+          meta: { title: '员工账号与角色管理', allowedRoles: ['COMMUNITY_ADMIN'] }
+        },
+        {
           path: '/audit/trail-center',
           name: 'AuditLog',
           component: AuditLogView,
@@ -95,17 +102,20 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   try {
     const current = await adminApi.getCurrentUser()
-    if (!current.data || !['COMMUNITY_ADMIN', 'GRID_WORKER'].includes(current.data.currentRole)) {
+    if (!current.data || !['COMMUNITY_ADMIN', 'GRID_WORKER', 'CARE_WORKER'].includes(current.data.currentRole)) {
       localStorage.removeItem('user')
+      localStorage.removeItem('token')
       localStorage.removeItem('csrfToken')
       localStorage.removeItem('activeRole')
       return to.path === '/login' ? true : '/login'
     }
     localStorage.setItem('user', JSON.stringify(current.data))
     const workerHome = '/order/execution-review'
-    if (current.data.currentRole === 'GRID_WORKER') {
+    if (current.data.currentRole === 'GRID_WORKER' || current.data.currentRole === 'CARE_WORKER') {
       return to.path === workerHome ? true : workerHome
     }
+    const allowedRoles = to.meta.allowedRoles as string[] | undefined
+    if (allowedRoles && !allowedRoles.includes(current.data.currentRole)) return '/dashboard/community'
     return to.path === '/login' ? '/dashboard/community' : true
   } catch {
     return to.path === '/login' ? true : '/login'
