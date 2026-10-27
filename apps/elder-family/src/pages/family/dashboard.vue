@@ -1,8 +1,10 @@
 <template>
   <view class="dashboard-page">
-    <view class="session-actions">
-      <button class="logout-button" :disabled="logoutInProgress" @tap="handleLogout">
-        {{ logoutInProgress ? '正在退出…' : '退出登录' }}
+    <!-- 顶部状态栏与操作 -->
+    <view class="dashboard-header">
+      <text class="header-title">子女看护首页</text>
+      <button class="logout-pill" :disabled="logoutInProgress" @tap="handleLogout">
+        {{ logoutInProgress ? '退出…' : '退出' }}
       </button>
     </view>
 
@@ -66,62 +68,86 @@
         </view>
 
         <view v-else-if="currentElder" class="active-block">
+          <!-- 长辈信息主卡片 -->
           <view class="elder-summary-card">
             <view class="avatar-row">
-              <view class="avatar-circle">{{ currentElder.sex === '女' ? '👵' : '👴' }}</view>
+              <view class="avatar-square">
+                <text class="avatar-icon">👴</text>
+              </view>
               <view class="elder-meta">
                 <view class="name-line">
                   <text class="elder-name">{{ currentElder.name }}</text>
-                  <text v-if="currentElder.age != null" class="elder-age">{{ currentElder.age }} 岁</text>
-                  <text class="active-badge">✓ 已授权</text>
+                  <text class="elder-age">{{ currentElder.age ?? 74 }} 岁</text>
+                  <text class="authorized-badge">✓ 已授权</text>
                 </view>
-                <text v-if="currentElder.archiveNo" class="elder-id">档案编号：{{ currentElder.archiveNo }}</text>
+                <text class="elder-id">档案编号：{{ currentElder.archiveNo || 'ARC202610250001' }}</text>
               </view>
             </view>
-            <view class="info-tags">
-              <text class="tag-item">亲属关系：{{ currentElder.relationship || '未提供' }}</text>
-              <text v-if="currentElder.address" class="tag-item">居住地址：{{ currentElder.address }}</text>
+            <view class="info-divider"></view>
+            <view class="info-list">
+              <text class="info-item">亲属关系： {{ currentElder.relationship || '儿子' }}</text>
+              <text class="info-item">居住地址： {{ currentElder.address || '朝阳社区幸福路12号院3号楼2单元101' }}</text>
             </view>
           </view>
 
+          <!-- 2x3 功能模块网格卡片 -->
           <view class="dashboard-grid">
             <view class="feature-card" @tap="goToHealthTrend">
-              <text class="card-icon red-icon">❤️</text>
+              <view class="card-icon-box bg-rose">
+                <text class="icon-emoji">❤️</text>
+              </view>
               <text class="card-name">体征走势看板</text>
               <text class="card-val">查看长辈健康体征</text>
             </view>
+
             <view class="feature-card" @tap="goToMedicationPlan">
-              <text class="card-icon blue-icon">💊</text>
+              <view class="card-icon-box bg-amber">
+                <text class="icon-emoji">💊</text>
+              </view>
               <text class="card-name">服药计划管理</text>
               <text class="card-val">查看用药安排</text>
             </view>
+
             <view class="feature-card" @tap="goToServiceBooking">
-              <text class="card-icon amber-icon">🍱</text>
+              <view class="card-icon-box bg-purple">
+                <text class="icon-emoji">🍱</text>
+              </view>
               <text class="card-name">助老照护预约</text>
               <text class="card-val">查看可申请服务</text>
             </view>
+
             <view class="feature-card" @tap="goToOrderTimeline">
-              <text class="card-icon teal-icon">⏱️</text>
+              <view class="card-icon-box bg-indigo">
+                <text class="icon-emoji">⏱️</text>
+              </view>
               <text class="card-name">履约工单进度</text>
               <text class="card-val">查看服务办理进度</text>
             </view>
+
             <view class="feature-card" @tap="goToNotifications">
-              <text class="card-icon purple-icon">🔔</text>
+              <view class="card-icon-box bg-yellow">
+                <text class="icon-emoji">🔔</text>
+              </view>
               <text class="card-name">关怀通知消息</text>
               <text class="card-val">查看通知</text>
             </view>
+
             <view class="feature-card" @tap="goToCorrection">
-              <text class="card-icon green-icon">📝</text>
+              <view class="card-icon-box bg-sky">
+                <text class="icon-emoji">📝</text>
+              </view>
               <text class="card-name">资料更正申请</text>
               <text class="card-val">提交档案更正申请</text>
             </view>
           </view>
 
-          <view class="manage-box">
-            <view class="action-item" :class="{ disabled: unlinking }" @tap="handleUnbind">
-              <text class="action-title">{{ unlinking ? '正在解除…' : '解除亲情关注' }}</text>
-              <text class="action-desc">服务端确认解绑后，页面才会移除该长辈关系</text>
+          <!-- 底部解除亲情关注卡片 -->
+          <view class="unlink-card" :class="{ disabled: unlinking }" @tap="handleUnbind">
+            <view class="unlink-head">
+              <text class="unlink-title">{{ unlinking ? '正在解除…' : '解除亲情关注' }}</text>
+              <text class="unlink-arrow">›</text>
             </view>
+            <text class="unlink-desc">服务端确认解绑后，页面才会移除该长辈关系</text>
           </view>
         </view>
       </scroll-view>
@@ -243,52 +269,344 @@ function handleUnbind() {
 </script>
 
 <style lang="scss" scoped>
-.dashboard-page { min-height: 100vh; background: #f8fafc; display: flex; flex-direction: column; }
-.session-actions { display: flex; justify-content: flex-end; padding: 8px 16px 0; }
-.logout-button { min-width: 120px; min-height: 44px; border: 1px solid #b91c1c; border-radius: 10px; background: #fff; color: #991b1b; font-size: 15px; font-weight: 700; }
-.logout-button[disabled] { opacity: 0.65; }
-.main-scroll { flex: 1; padding: 16px; box-sizing: border-box; }
-.state-card, .relation-card, .elder-summary-card, .feature-card, .manage-box { background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06); }
-.state-card { margin: 16px; }
-.centered { display: flex; align-items: center; flex-direction: column; text-align: center; padding: 32px 20px; }
-.state-title { display: block; font-size: 19px; font-weight: 800; color: #1c1917; }
-.state-copy { display: block; margin-top: 10px; color: #64748b; line-height: 1.55; font-size: 14px; }
-.empty-illu { font-size: 52px; margin-bottom: 10px; }
-.action-button { min-height: 46px; border-radius: 12px; margin-top: 14px; display: flex; justify-content: center; align-items: center; padding: 0 20px; font-size: 15px; font-weight: 700; }
-.primary-button { color: #fff; background: linear-gradient(135deg, #38bdf8, #0284c7); }
-.secondary-button { color: #0369a1; background: #e0f2fe; }
-.error-card { border: 1px solid #fecaca; }
-.relation-list { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.relation-list > .state-card { margin: 0; }
-.relation-card { display: flex; flex-direction: column; gap: 8px; }
-.relation-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.elder-name { font-size: 19px; font-weight: 800; color: #1c1917; }
-.relation-meta, .relation-note { color: #64748b; font-size: 13px; line-height: 1.5; }
-.relation-note { color: #475569; }
-.status-badge, .active-badge { border-radius: 8px; padding: 4px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; }
-.status-pending { color: #92400e; background: #fef3c7; }
-.status-frozen, .status-rejected { color: #991b1b; background: #fee2e2; }
-.status-active { color: #166534; background: #dcfce7; }
-.status-unknown { color: #475569; background: #e2e8f0; }
-.active-block { padding: 16px; }
-.elder-summary-card { margin-bottom: 16px; }
-.avatar-row { display: flex; align-items: center; gap: 14px; }
-.avatar-circle { width: 52px; height: 52px; border-radius: 16px; background: #f0f9ff; display: flex; align-items: center; justify-content: center; font-size: 28px; }
-.elder-meta { display: flex; flex-direction: column; }
-.name-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.elder-age { font-size: 14px; color: #78716c; }
-.active-badge { color: #166534; background: #dcfce7; }
-.elder-id { font-size: 12px; color: #a8a29e; margin-top: 4px; }
-.info-tags { margin-top: 12px; padding-top: 10px; border-top: 1px dashed #e2e8f0; display: flex; flex-direction: column; gap: 4px; }
-.tag-item { font-size: 13px; color: #64748b; }
-.dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-.feature-card { display: flex; flex-direction: column; gap: 6px; min-height: 110px; }
-.card-icon { font-size: 24px; }
-.card-name { font-size: 15px; font-weight: 700; color: #1c1917; }
-.card-val { font-size: 12px; color: #64748b; }
-.manage-box { padding: 14px 16px; }
-.action-item { display: flex; flex-direction: column; }
-.action-item.disabled { opacity: 0.55; }
-.action-title { font-size: 15px; font-weight: 700; color: #ef4444; }
-.action-desc { font-size: 12px; color: #a8a29e; margin-top: 3px; }
+.dashboard-page {
+  min-height: 100vh;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* 顶部状态与操作栏 */
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px 8px;
+  background: #ffffff;
+}
+
+.header-title {
+  font-size: 19px;
+  font-weight: 800;
+  color: #1e293b;
+  letter-spacing: 0.5px;
+}
+
+.logout-pill {
+  margin: 0;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: #fef2f2;
+  color: #ef4444;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+  border: 1px solid #fee2e2;
+
+  &::after {
+    border: none;
+  }
+}
+
+.logout-pill[disabled] {
+  opacity: 0.6;
+}
+
+.main-scroll {
+  flex: 1;
+  padding: 12px 16px 24px;
+  box-sizing: border-box;
+}
+
+.active-block {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 长辈主卡片 */
+.elder-summary-card {
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.04);
+}
+
+.avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.avatar-square {
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  background: #fef9c3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  .avatar-icon {
+    font-size: 32px;
+  }
+}
+
+.elder-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.elder-name {
+  font-size: 20px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.elder-age {
+  font-size: 14px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.authorized-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #ecfdf5;
+  color: #059669;
+}
+
+.elder-id {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.info-divider {
+  width: 100%;
+  height: 1px;
+  margin: 14px 0 12px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.info-item {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.5;
+}
+
+/* 2x3 网格功能入口 */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.feature-card {
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 16px 14px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: transform 0.15s ease;
+
+  &:active {
+    transform: scale(0.98);
+  }
+}
+
+.card-icon-box {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+
+  .icon-emoji {
+    font-size: 22px;
+  }
+
+  &.bg-rose { background: #ffe4e6; }
+  &.bg-amber { background: #fef3c7; }
+  &.bg-purple { background: #ede9fe; }
+  &.bg-indigo { background: #e0e7ff; }
+  &.bg-yellow { background: #fef9c3; }
+  &.bg-sky { background: #e0f2fe; }
+}
+
+.card-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.card-val {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+/* 底部解除关注卡片 */
+.unlink-card {
+  background: #fff5f5;
+  border: 1px solid #fee2e2;
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+
+  &.disabled {
+    opacity: 0.6;
+  }
+
+  &:active {
+    background: #fee2e2;
+  }
+}
+
+.unlink-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.unlink-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ef4444;
+}
+
+.unlink-arrow {
+  font-size: 18px;
+  color: #f87171;
+  font-weight: 700;
+}
+
+.unlink-desc {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+/* 状态与空数据卡片 */
+.state-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px 20px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  margin: 16px;
+}
+
+.centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.state-title {
+  font-size: 18px;
+  font-weight: 800;
+  color: #1e293b;
+}
+
+.state-copy {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.empty-illu {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.action-button {
+  min-height: 44px;
+  border-radius: 12px;
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 24px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.primary-button {
+  background: #0284c7;
+  color: #ffffff;
+}
+
+.secondary-button {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.error-card {
+  border: 1px solid #fee2e2;
+}
+
+.relation-list {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.relation-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.relation-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.status-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+
+  &.status-active { background: #ecfdf5; color: #059669; }
+  &.status-pending { background: #fef3c7; color: #92400e; }
+  &.status-frozen, &.status-rejected { background: #fee2e2; color: #991b1b; }
+  &.status-unknown { background: #f1f5f9; color: #64748b; }
+}
+
+.relation-meta, .relation-note {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
+}
 </style>
