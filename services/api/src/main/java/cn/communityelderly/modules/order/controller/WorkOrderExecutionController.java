@@ -21,7 +21,7 @@ public class WorkOrderExecutionController {
     }
 
     @PostMapping(value = {"/{workOrderId}/execution", "/{workOrderId}/execution/submit"})
-    @RequireRoles({"GRID_WORKER"})
+    @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> submitExecution(@PathVariable Long workOrderId,
                                         @Valid @RequestBody WorkOrderExecutionDTO dto) {
         CurrentUser user = UserContext.requireCurrentUser();

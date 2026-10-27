@@ -3,7 +3,7 @@
     <div class="view-header">
       <div>
         <h2 class="view-title">工单执行与成果审核</h2>
-        <p class="view-subtitle">根据当前登录角色展示网格员履约任务或社区管理员待审核工单。</p>
+        <p class="view-subtitle">网格员与护工仅查看本人当前承接的工单；社区管理员在此审核服务成果。</p>
       </div>
       <el-button :loading="loading" @click="loadData">刷新</el-button>
     </div>
@@ -13,7 +13,7 @@
 
     <el-tabs v-if="isWorker || isAdmin" v-model="activeTab" class="custom-tabs" type="border-card">
       <el-tab-pane v-if="isWorker" label="我的执行任务" name="WORKER_DESK">
-        <el-table :data="workerOrders" border stripe style="width: 100%" v-loading="loading" empty-text="当前没有待处理的网格员工单">
+        <el-table :data="workerOrders" border stripe style="width: 100%" v-loading="loading" :empty-text="isCareWorker ? '当前没有分配给你的护工工单' : '当前没有待处理的网格员工单'">
           <el-table-column prop="orderNo" label="工单编号" min-width="150" />
           <el-table-column prop="elderName" label="服务长辈" width="110" />
           <el-table-column label="服务项目" min-width="140">
@@ -290,7 +290,8 @@ const reviewAction = ref<'APPROVE' | 'REJECT' | null>(null)
 const currentReviewingOrder = ref<WorkOrder | null>(null)
 const reviewComment = ref('')
 
-const isWorker = computed(() => currentRole.value === 'GRID_WORKER')
+const isWorker = computed(() => currentRole.value === 'GRID_WORKER' || currentRole.value === 'CARE_WORKER')
+const isCareWorker = computed(() => currentRole.value === 'CARE_WORKER')
 const isAdmin = computed(() => currentRole.value === 'COMMUNITY_ADMIN')
 const reportOrderLabel = computed(() => {
   const order = currentReportingOrder.value
@@ -311,7 +312,7 @@ function requireCurrentRole(data: unknown) {
     throw new Error('当前用户响应缺少角色信息，无法加载对应工单工作台。')
   }
   const role = (data as { currentRole?: unknown }).currentRole
-  if (role !== 'COMMUNITY_ADMIN' && role !== 'GRID_WORKER') {
+  if (role !== 'COMMUNITY_ADMIN' && role !== 'GRID_WORKER' && role !== 'CARE_WORKER') {
     throw new Error('当前登录角色无权访问工单执行与审核页面。')
   }
   return role
@@ -355,14 +356,14 @@ async function loadData() {
     const role = requireCurrentRole(userResponse.data)
     const roleChanged = currentRole.value !== role
     currentRole.value = role
-    activeTab.value = role === 'GRID_WORKER' ? 'WORKER_DESK' : 'REVIEW_DESK'
+    activeTab.value = role === 'COMMUNITY_ADMIN' ? 'REVIEW_DESK' : 'WORKER_DESK'
 
     if (roleChanged) {
       workerOrders.value = []
       pendingReviewOrders.value = []
     }
 
-    if (role === 'GRID_WORKER') {
+    if (role === 'GRID_WORKER' || role === 'CARE_WORKER') {
       const response = await adminApi.getMyTasks()
       workerOrders.value = requireOrderList(response.data).filter(order =>
         ['DISPATCHED', 'ACCEPTED', 'PROCESSING', 'PENDING_RESULT_REVIEW'].includes(order.status),
@@ -469,7 +470,11 @@ async function handleCustomUpload(options: UploadRequestOptions) {
   const uid = file?.uid
   uploadingCount.value += 1
   try {
-    const response = await adminApi.uploadPhotoEvidence(file)
+    const workOrderId = currentReportingOrder.value?.workOrderId
+    if (isCareWorker.value && workOrderId === undefined) {
+      throw new Error('无法确认当前工单，护工照片凭据未上传。请关闭窗口并重新打开工单。')
+    }
+    const response = await adminApi.uploadPhotoEvidence(file, workOrderId)
     const url = typeof response.data?.url === 'string' ? response.data.url.trim() : ''
     if (!url || url.startsWith('blob:') || url.startsWith('data:')) {
       throw new Error('上传响应未返回有效的服务端照片地址。')

@@ -46,5 +46,5 @@ src/
 
 ## 微信小程序开发者工具导入
 
-微信小程序构建输出位于 `dist/build/mp-weixin/`，该目录被 Git 忽略，也是微信开发者工具的导入目录；不要选择本工程的源码根目录。首期目标平台为微信小程序，微信 AppID 已写入 `src/manifest.json` 的 `mp-weixin.appid`。
+微信小程序构建输出位于 `dist/build/mp-weixin/`，该目录被 Git 忽略，也是微信开发者工具的导入目录；不要选择本工程的源码根目录。首次检出后，复制 `src/manifest.example.json` 为 `src/manifest.json`，在后者的 `mp-weixin.appid` 填写自己的微信 AppID，再运行小程序构建。`src/manifest.json` 是本机配置，已被 Git 忽略；不要将 AppID 或 AppSecret 写入文档及其他已跟踪文件。
 页面与适老化规范详见[现行小程序代码架构](../../docs/current/小程序代码架构.md)与[M01/M02原型与交互设计说明书](../../docs/current/原型与交互设计_M01_M02.md)。

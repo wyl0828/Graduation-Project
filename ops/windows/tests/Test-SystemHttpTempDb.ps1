@@ -23,6 +23,20 @@ $script:httpPort = $null
 $script:apiBase = $null
 $script:httpClient = $null
 $script:cookieContainer = $null
+$script:storageRoot = $null
+$script:extraHttpClients = [Collections.Generic.List[System.Net.Http.HttpClient]]::new()
+$script:syntheticWorkOrderIds = [Collections.Generic.List[long]]::new()
+$script:syntheticStaffUserIds = [Collections.Generic.List[long]]::new()
+$script:syntheticFamilyUserId = 0L
+$script:syntheticFamilyElderId = 0L
+$script:syntheticFamilyTicketId = $null
+$script:syntheticFamilyPhone = $null
+$script:syntheticFamilyArchiveNo = $null
+$script:syntheticStaffPhone = $null
+$script:syntheticCrossCommunityStaffPhone = $null
+$script:syntheticCrossCommunityElderId = 0L
+$script:syntheticFixturesStarted = $false
+$script:fixtureCleanupMessage = '未执行'
 $script:envKeys = @(
     'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD',
     'SERVER_ADDRESS', 'SERVER_PORT', 'SPRING_PROFILES_ACTIVE',
@@ -39,6 +53,16 @@ $script:checks = [ordered]@{
     '现有 first-load seed wrapper 在临时库返回退出码 0' = '未执行'
     'Seed 后 API 在随机 loopback HTTP 端口健康可用（Maven 前）' = '未执行'
     '匿名访问当前用户接口返回 HTTP 401' = '未执行'
+    '有效子女通过 HTTP 读取已绑定老人档案' = '未执行'
+    '待审核子女读取老人档案返回 HTTP 404' = '未执行'
+    '待审核子女创建预约返回 HTTP 404 且业务事实未变化' = '未执行'
+    '冻结亲情访问返回 HTTP 403 KINSHIP_NOT_ACTIVE' = '未执行'
+    '有效子女读取同社区未绑定老人返回 HTTP 404' = '未执行'
+    '过期绝对期限会话访问返回 HTTP 401' = '未执行'
+    '撤销当前角色分配后旧会话返回 HTTP 401' = '未执行'
+    '社区管理员和网格员读取另一社区老人均返回 HTTP 404' = '未执行'
+    '跨社区管理员写入返回 HTTP 404 且数据库业务事实未变化' = '未执行'
+    '同社区管理员和网格员仍可读取本社区老人档案' = '未执行'
     '契约 §5.1 的六个合成账号全部登录成功且凭据未输出' = '未执行'
     'Web 登录设置 HttpOnly 会话 Cookie、提供 CSRF Token 且响应不返回 Bearer Token' = '未执行'
     'Web Cookie 写请求缺少 CSRF Token 时返回 HTTP 403' = '未执行'
@@ -66,6 +90,7 @@ $script:checks = [ordered]@{
     'HTTP 冒烟结束后 API 已停止且端口释放，才运行完整 Maven 测试' = '未执行'
     'Maven 全套结束后 API 在隔离端口重新健康可用' = '未执行'
     '临时数据库上的完整 Maven 测试套件通过' = '未执行'
+    'Task 4 新增员工/家庭/工单夹具在清理前移除' = '未执行'
     '停止临时 API/MySQL，并核验 datadir 位于专属 tempRoot 后清理' = '未执行'
 }
 $script:failureMessage = $null
@@ -211,6 +236,208 @@ function Invoke-Mysql([string[]]$Arguments, [string]$InputText = '') {
     return [pscustomobject]@{ ExitCode = $process.ExitCode; StdOut = $stdout; StdErr = $stderr }
 }
 
+function Invoke-AppDatabaseQuery([string]$Sql) {
+    return Invoke-Mysql @(
+        '-h127.0.0.1', "-P$($script:dbPort)", '-uelderly_app',
+        '--database=elderly_care_demo', '-N', '-B', '-e', $Sql
+    )
+}
+
+function Get-IsolatedBusinessFacts {
+    $sql = @'
+SELECT CONCAT_WS('|',
+    COALESCE((SELECT GROUP_CONCAT(CONCAT(elder_id, ':', status, ':', row_version) ORDER BY elder_id SEPARATOR ',') FROM elder_profile), ''),
+    COALESCE((SELECT GROUP_CONCAT(CONCAT(link_id, ':', status, ':', row_version) ORDER BY link_id SEPARATOR ',') FROM elder_family_link), ''),
+    (SELECT COUNT(*) FROM family_link_application),
+    (SELECT COUNT(*) FROM service_reservation),
+    COALESCE((SELECT GROUP_CONCAT(CONCAT(reservation_id, ':', status) ORDER BY reservation_id SEPARATOR ',') FROM service_reservation), ''),
+    (SELECT COUNT(*) FROM work_order),
+    COALESCE((SELECT GROUP_CONCAT(CONCAT(work_order_id, ':', status, ':', COALESCE(current_assignee_id, '')) ORDER BY work_order_id SEPARATOR ',') FROM work_order), ''),
+    (SELECT COUNT(*) FROM notification_event),
+    (SELECT COUNT(*) FROM notification_delivery)
+);
+'@
+    $result = Invoke-AppDatabaseQuery $sql
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated business-fact snapshot.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-StaffMutationSnapshot {
+    $sql = @'
+SELECT CONCAT_WS('|',
+    (SELECT CONCAT(COUNT(*), ':', COALESCE(GROUP_CONCAT(CONCAT(user_id, ':', account_kind, ':', status) ORDER BY user_id SEPARATOR ','), '')) FROM sys_user),
+    (SELECT CONCAT(COUNT(*), ':', COALESCE(GROUP_CONCAT(CONCAT(assignment_id, ':', user_id, ':', role_code, ':', COALESCE(community_id, 'NULL'), ':', status, ':', COALESCE(revoke_reason, '')) ORDER BY assignment_id SEPARATOR ','), '')) FROM sys_user_role),
+    (SELECT CONCAT(COUNT(*), ':', COALESCE(GROUP_CONCAT(CONCAT(user_id, ':', client_type, ':', IF(revoked_at IS NULL, 'ACTIVE', CONCAT('REVOKED:', COALESCE(revoke_reason, '')))) ORDER BY user_id, created_at, client_type SEPARATOR ','), '')) FROM auth_session),
+    (SELECT COUNT(*) FROM audit_log)
+);
+'@
+    $result = Invoke-AppDatabaseQuery $sql
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated staff/session/audit snapshot.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-IsolatedTestSideEffectSnapshot {
+    return (Get-IsolatedBusinessFacts) + '||' + (Get-StaffMutationSnapshot)
+}
+
+function Get-SessionFactsForUser([long]$UserId) {
+    $result = Invoke-AppDatabaseQuery @"
+SELECT CONCAT_WS('|',
+    COUNT(*),
+    COALESCE(SUM(revoked_at IS NULL), 0),
+    COALESCE(SUM(revoked_at IS NOT NULL AND revoke_reason = 'ROLE_CHANGED'), 0),
+    COALESCE(GROUP_CONCAT(CONCAT(client_type, ':', IF(revoked_at IS NULL, 'ACTIVE', CONCAT('REVOKED:', COALESCE(revoke_reason, '')))) ORDER BY created_at, client_type SEPARATOR ','), '')
+)
+FROM auth_session WHERE user_id = $UserId;
+"@
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated target-session snapshot.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-StaffAuditFacts([long]$UserId, [string]$Action) {
+    $result = Invoke-AppDatabaseQuery @"
+SELECT CONCAT_WS('|', actor_user_id, actor_role, COALESCE(community_id, 'NULL'), target_type, target_id, action, result,
+    COALESCE(HEX(CAST(details_json AS CHAR CHARACTER SET utf8mb4)), ''))
+FROM audit_log
+WHERE target_type = 'STAFF' AND target_id = '$UserId' AND action = '$Action'
+ORDER BY audit_id DESC LIMIT 1;
+"@
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated staff audit fact.' }
+    $parts = [string]$result.StdOut.Trim() -split '\|', 8
+    if ($parts.Count -eq 8 -and $parts[7]) {
+        try {
+            $detailsBytes = [Convert]::FromHexString($parts[7])
+            $parts[7] = [Text.Encoding]::UTF8.GetString($detailsBytes)
+        } catch {
+            throw 'Could not decode the isolated UTF-8 staff audit details.'
+        }
+    }
+    return $parts -join '|'
+}
+
+function Get-ActiveStaffRoles([long]$UserId) {
+    $result = Invoke-AppDatabaseQuery @"
+SELECT COALESCE(GROUP_CONCAT(role_code ORDER BY role_code SEPARATOR ','), '')
+FROM sys_user_role WHERE user_id = $UserId AND community_id = 1 AND status = 'ACTIVE';
+"@
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated active staff roles.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-FamilyIdentityFacts([long]$UserId, [long]$ElderId, [string]$TicketId) {
+    $result = Invoke-AppDatabaseQuery @"
+SELECT CONCAT_WS('|',
+    (SELECT COALESCE(GROUP_CONCAT(role_code ORDER BY role_code SEPARATOR ','), '')
+       FROM sys_user_role WHERE user_id = $UserId AND status = 'ACTIVE'),
+    (SELECT COUNT(*) FROM elder_family_link WHERE child_user_id = $UserId AND elder_id = $ElderId AND status = 'ACTIVE'),
+    (SELECT COUNT(*) FROM elder_identity_link WHERE user_id = $UserId AND elder_id = $ElderId
+       AND linked_by_activation_ticket_id = '$TicketId'),
+    (SELECT COUNT(*) FROM elder_activation_ticket WHERE ticket_id = '$TicketId' AND status = 'USED')
+);
+"@
+    if ($result.ExitCode -ne 0) { throw 'Could not read the isolated FAMILY role/link/identity snapshot.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function New-SyntheticWorkOrder([string]$Status, [long]$AssigneeId, [long]$ElderId, [long]$CommunityId) {
+    $orderNo = 'SYSCARE' + [Guid]::NewGuid().ToString('N').Substring(0, 20)
+    $insert = Invoke-AppDatabaseQuery @"
+INSERT INTO work_order (
+    order_no, source_type, source_reference_id, elder_id, community_id, service_type,
+    order_title, order_description, status, current_assignee_id, dispatch_time, result_photo_required
+)
+VALUES (
+    '$orderNo', 'MANUAL', '$orderNo', $ElderId, $CommunityId, 'DAILY_CARE',
+    '隔离护工工单', '仅用于隔离 HTTP 授权验收', '$Status', $AssigneeId, NOW(3), 1
+);
+"@
+    if ($insert.ExitCode -ne 0) { throw 'Could not create an isolated care-worker work-order fixture.' }
+    $query = Invoke-AppDatabaseQuery "SELECT work_order_id FROM work_order WHERE order_no = '$orderNo';"
+    $workOrderId = 0L
+    $parsed = [long]::TryParse($query.StdOut.Trim(), [ref]$workOrderId)
+    if ($query.ExitCode -ne 0 -or -not $parsed -or $workOrderId -le 0) {
+        throw 'Could not read back an isolated care-worker work-order fixture.'
+    }
+    $script:syntheticWorkOrderIds.Add($workOrderId)
+    return $workOrderId
+}
+
+function Remove-SyntheticDatabaseFixtures {
+    $hasFixtures = $script:syntheticFixturesStarted -or $script:syntheticWorkOrderIds.Count -gt 0 -or
+        $script:syntheticStaffPhone -or $script:syntheticCrossCommunityStaffPhone -or
+        $script:syntheticFamilyPhone -or $script:syntheticCrossCommunityElderId -gt 0
+    if (-not $hasFixtures) { return $true }
+    if (-not $script:dbPort -or -not $script:mysqlProcess) { return $false }
+    try {
+        $script:mysqlProcess.Refresh()
+        if ($script:mysqlProcess.HasExited) { return $false }
+
+        $orderIds = @($script:syntheticWorkOrderIds.ToArray() | Select-Object -Unique)
+        $orderIdList = if ($orderIds.Count -gt 0) { $orderIds -join ',' } else { '0' }
+        $staffPhone = if ($script:syntheticStaffPhone) { [string]$script:syntheticStaffPhone } else { '13900000000' }
+        $crossStaffPhone = if ($script:syntheticCrossCommunityStaffPhone) { [string]$script:syntheticCrossCommunityStaffPhone } else { '13900000000' }
+        $familyPhone = if ($script:syntheticFamilyPhone) { [string]$script:syntheticFamilyPhone } else { '13900000000' }
+        $familyArchiveNo = if ($script:syntheticFamilyArchiveNo) { [string]$script:syntheticFamilyArchiveNo } else { 'SYSHTTP-FAM-NONE' }
+        $ticketId = if ($script:syntheticFamilyTicketId) { [string]$script:syntheticFamilyTicketId } else { '00000000-0000-0000-0000-000000000000' }
+        $communityElderId = if ($script:syntheticCrossCommunityElderId -gt 0) { [string]$script:syntheticCrossCommunityElderId } else { '0' }
+
+        $sql = @"
+SET @syshttp_staff_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_normalized = '$staffPhone' AND account_kind = 'STAFF' LIMIT 1), 0);
+SET @syshttp_cross_staff_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_normalized = '$crossStaffPhone' AND account_kind = 'STAFF' LIMIT 1), 0);
+SET @syshttp_family_user_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_normalized = '$familyPhone' AND account_kind = 'FAMILY' LIMIT 1), 0);
+SET @syshttp_family_elder_id = COALESCE((SELECT elder_id FROM elder_profile WHERE archive_no = '$familyArchiveNo' LIMIT 1), 0);
+DELETE FROM work_order_action_history WHERE work_order_id IN ($orderIdList);
+DELETE FROM work_order_assignment_history WHERE work_order_id IN ($orderIdList);
+DELETE FROM work_order_handoff WHERE work_order_id IN ($orderIdList);
+DELETE FROM audit_log WHERE target_type = 'WORK_ORDER'
+  AND target_id IN (SELECT CAST(work_order_id AS CHAR) FROM work_order WHERE work_order_id IN ($orderIdList));
+DELETE FROM work_order WHERE work_order_id IN ($orderIdList);
+DELETE FROM elder_family_link WHERE child_user_id = @syshttp_family_user_id OR elder_id = @syshttp_family_elder_id;
+DELETE FROM elder_identity_link WHERE user_id = @syshttp_family_user_id OR elder_id = @syshttp_family_elder_id;
+DELETE FROM elder_activation_ticket WHERE ticket_id = '$ticketId' OR elder_id = @syshttp_family_elder_id;
+DELETE FROM auth_session WHERE user_id IN (@syshttp_staff_id, @syshttp_cross_staff_id, @syshttp_family_user_id);
+DELETE FROM sys_user_role WHERE user_id IN (@syshttp_staff_id, @syshttp_cross_staff_id, @syshttp_family_user_id);
+DELETE FROM audit_log WHERE target_type = 'STAFF'
+  AND target_id IN (CAST(@syshttp_staff_id AS CHAR), CAST(@syshttp_cross_staff_id AS CHAR));
+DELETE FROM sys_user WHERE user_id IN (@syshttp_staff_id, @syshttp_cross_staff_id, @syshttp_family_user_id);
+DELETE FROM elder_profile WHERE elder_id = @syshttp_family_elder_id;
+DELETE FROM elder_profile WHERE elder_id = $communityElderId AND archive_no = 'SYSHTTP-COMM2-ELDER';
+SELECT CONCAT_WS('|',
+    (SELECT COUNT(*) FROM sys_user WHERE phone_normalized IN ('$staffPhone', '$crossStaffPhone', '$familyPhone')),
+    (SELECT COUNT(*) FROM elder_profile WHERE archive_no = '$familyArchiveNo' OR archive_no = 'SYSHTTP-COMM2-ELDER'),
+    (SELECT COUNT(*) FROM elder_activation_ticket WHERE ticket_id = '$ticketId'),
+    (SELECT COUNT(*) FROM work_order WHERE work_order_id IN ($orderIdList))
+);
+"@
+        $result = Invoke-AppDatabaseQuery $sql
+        if ($result.ExitCode -ne 0) { return $false }
+        return [string]$result.StdOut.Trim() -eq '0|0|0|0'
+    } catch {
+        return $false
+    }
+}
+
+function Get-StorageFileCount {
+    if (-not $script:storageRoot -or -not (Test-Path -LiteralPath $script:storageRoot)) { return 0 }
+    return @(Get-ChildItem -LiteralPath $script:storageRoot -File -Recurse -Force -ErrorAction Stop).Count
+}
+
+function New-TestHttpClient {
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $cookies = [Net.CookieContainer]::new()
+    $handler.CookieContainer = $cookies
+    $handler.UseCookies = $true
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(20)
+    $script:extraHttpClients.Add($client)
+    return [pscustomobject]@{ Client = $client; Cookies = $cookies }
+}
+
+function New-SyntheticPhone {
+    return '139' + [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(10000000, 99999999)
+}
+
 function Start-IsolatedMysql([string[]]$Arguments, [string]$StdoutPath, [string]$StderrPath) {
     $quotedArgs = $Arguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }
     return Start-Process -FilePath $script:mysqlServerExe -ArgumentList ($quotedArgs -join ' ') `
@@ -315,19 +542,23 @@ function Invoke-Api(
     [string]$Path,
     [object]$Body = $null,
     [string]$BearerToken = $null,
-    [string]$CsrfToken = $null
+    [string]$CsrfToken = $null,
+    [string]$IdempotencyKey = $null,
+    [System.Net.Http.HttpClient]$Client = $null
 ) {
     $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($Method), ($script:apiBase + $Path))
+    $clientToUse = if ($Client) { $Client } else { $script:httpClient }
     if ($BearerToken) {
         $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $BearerToken)
     }
     if ($CsrfToken) { [void]$request.Headers.TryAddWithoutValidation('X-CSRF-Token', $CsrfToken) }
+    if ($IdempotencyKey) { [void]$request.Headers.TryAddWithoutValidation('Idempotency-Key', $IdempotencyKey) }
     if ($null -ne $Body) {
         $json = ConvertTo-Json -InputObject $Body -Depth 12 -Compress
         $request.Content = [System.Net.Http.StringContent]::new($json, [Text.Encoding]::UTF8, 'application/json')
     }
     try {
-        $response = $script:httpClient.SendAsync($request).GetAwaiter().GetResult()
+        $response = $clientToUse.SendAsync($request).GetAwaiter().GetResult()
         $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
         return [pscustomobject]@{ StatusCode = [int]$response.StatusCode; Content = $content; Response = $response }
     } catch {
@@ -337,8 +568,16 @@ function Invoke-Api(
     }
 }
 
-function Invoke-PhotoUpload([string]$Path, [string]$BearerToken) {
-    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, ($script:apiBase + '/api/v1/files/upload'))
+function Invoke-PhotoUpload(
+    [string]$Path,
+    [string]$BearerToken,
+    [long]$WorkOrderId = 0,
+    [System.Net.Http.HttpClient]$Client = $null
+) {
+    $uploadPath = '/api/v1/files/upload'
+    if ($WorkOrderId -gt 0) { $uploadPath += '?workOrderId=' + [Uri]::EscapeDataString([string]$WorkOrderId) }
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, ($script:apiBase + $uploadPath))
+    $clientToUse = if ($Client) { $Client } else { $script:httpClient }
     $multipart = [System.Net.Http.MultipartFormDataContent]::new()
     $fileContent = $null
     try {
@@ -348,7 +587,7 @@ function Invoke-PhotoUpload([string]$Path, [string]$BearerToken) {
         $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/png')
         $multipart.Add($fileContent, 'file', [IO.Path]::GetFileName($Path))
         $request.Content = $multipart
-        $response = $script:httpClient.SendAsync($request).GetAwaiter().GetResult()
+        $response = $clientToUse.SendAsync($request).GetAwaiter().GetResult()
         $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
         return [pscustomobject]@{ StatusCode = [int]$response.StatusCode; Content = $content; Response = $response }
     } catch {
@@ -360,8 +599,8 @@ function Invoke-PhotoUpload([string]$Path, [string]$BearerToken) {
     }
 }
 
-function Assert-OkApiResponse([object]$Response, [string]$Description) {
-    if ($Response.StatusCode -ne 200) { throw "$Description returned an unexpected HTTP status." }
+function Assert-OkApiResponse([object]$Response, [string]$Description, [int]$ExpectedStatus = 200) {
+    if ($Response.StatusCode -ne $ExpectedStatus) { throw "$Description returned an unexpected HTTP status." }
     try { $json = ConvertFrom-Json -InputObject $Response.Content }
     catch { throw "$Description returned invalid JSON." }
     if ($json.code -ne 'OK') { throw "$Description returned a non-OK application result." }
@@ -477,6 +716,7 @@ function Write-RunReport([int]$ExitCode) {
     $lines.Add('')
     $lines.Add('## 失败与清理')
     $lines.Add('')
+    $lines.Add("- Task 4 合成夹具清理：$($script:fixtureCleanupMessage)")
     if ($script:failureMessage) { $lines.Add("- HTTP/脚本失败原因：$($script:failureMessage)") }
     else { $lines.Add('- HTTP/脚本失败原因：无。') }
     if ($script:junitFailureMessage) { $lines.Add("- JUnit 失败原因：$($script:junitFailureMessage)") }
@@ -495,7 +735,9 @@ function Write-RunReport([int]$ExitCode) {
     $lines.Add('')
     $lines.Add('- 脚本只在系统临时目录下建立专属 mysqld datadir；seed wrapper 仅连接 loopback 上的随机 MySQL 端口、`elderly_care_demo` / `elderly_app`。清理会先校验 datadir 位于本次唯一 tempRoot 内，否则拒绝递归删除。')
     $lines.Add('- 六个账号从接口契约 §5.1 动态读取；脚本输出和报告不包含手机号、密码、Cookie、Bearer Token、CSRF Token 或随机 marker 值。')
-    $lines.Add('- 覆盖 API 健康、匿名认证拒绝、六账号登录、Web Cookie/CSRF、老人资料/服药打卡、子女绑定老人/预约、管理员确认并派单、网格员履约照片提交、管理员审核至预约 COMPLETED，以及老人 SOS 触发/管理员处置；此外在同一临时库上运行完整 `mvn test`，但 HTTP 与 JUnit 结果分别报告。')
+    $lines.Add('- 覆盖员工 API 创建/角色替换、授权拒绝与无副作用快照、审计字段、API 角色变更后的 Web Cookie/MINIAPP 令牌撤销及重授后持续失效；覆盖预置 FAMILY CHILD+ELDER 切换后的独立关系/身份范围，以及 CARE_WORKER 当前承接工单执行和 workOrderId 绑定上传拒绝边界。')
+    $lines.Add('- 保留原有六账号登录、Web Cookie/CSRF、老人资料/服药打卡、子女绑定老人/预约、管理员确认并派单、网格员履约照片提交、管理员审核至预约 COMPLETED，以及老人 SOS 触发/管理员处置控制链；完整 `mvn test` 与 HTTP 链分别报告。')
+    $lines.Add('- 护工和家庭账号均为临时合成夹具；家庭 elder_identity_link 的激活票据仅为外键测试直接预置，未调用短信、注册、激活或设备 API。CARE_WORKER 上传前后统计 `APP_STORAGE_ROOT` 文件数，存储目录位于本次唯一 tempRoot 内。')
     $lines.Add('- Maven 测试前脚本会清空进程内所有 AUTH_TEST_* 变量，故 AuthDatabaseIntegrationTest 按环境条件跳过，不会覆盖同一演示 seed 账号；其跳过计入 JUnit 汇总。')
     $lines.Add('- 图片链使用合成 1x1 PNG 验证上传接口、文件读取与履约 URL 引用，不验证真实相机图片、前端预览/裁剪或完整 H5/管理端 UI；也未覆盖真实短信/验证码、所有业务角色/全部接口和并发/压力场景。')
     $lines.Add('- `-HoldSeconds` 在完整业务 HTTP 链通过后、停止 API/MySQL 前保留隔离 API 与 MySQL，默认 0，最大 300 秒；JUnit 已在此前 API 停止窗口完成。')
@@ -572,16 +814,14 @@ FLUSH PRIVILEGES;
     [Environment]::SetEnvironmentVariable('AUTH_COOKIE_SECURE', 'false', 'Process')
     [Environment]::SetEnvironmentVariable('PHONE_VERIFICATION_ENABLED', 'false', 'Process')
     [Environment]::SetEnvironmentVariable('APP_STORAGE_ROOT', (Join-Path $tempRoot 'files'), 'Process')
+    $script:storageRoot = Join-Path $tempRoot 'files'
+    New-Item -ItemType Directory -Path $script:storageRoot -Force | Out-Null
 
     $script:apiBase = "http://127.0.0.1:$($script:httpPort)"
     Add-Type -AssemblyName System.Net.Http
-    $handler = [System.Net.Http.HttpClientHandler]::new()
-    $handler.AllowAutoRedirect = $false
-    $script:cookieContainer = [Net.CookieContainer]::new()
-    $handler.CookieContainer = $script:cookieContainer
-    $handler.UseCookies = $true
-    $script:httpClient = [System.Net.Http.HttpClient]::new($handler)
-    $script:httpClient.Timeout = [TimeSpan]::FromSeconds(20)
+    $mainHttpContext = New-TestHttpClient
+    $script:cookieContainer = $mainHttpContext.Cookies
+    $script:httpClient = $mainHttpContext.Client
 
     $script:apiProcess = Start-TestApi 'flyway'
     $null = Wait-ApiReady -Process $script:apiProcess -PhaseName 'Flyway initialization'
@@ -694,11 +934,51 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
         ((Test-ApiBoundToLoopback $script:httpPort) -and (Test-TcpPortOpen $script:httpPort)) `
         'The API did not restart on its isolated HTTP port after the Maven suite.'
 
+    # Community 2 is already part of the synthetic seed. Add one isolated target only
+    # after Maven has finished, so no JUnit test can observe this HTTP fixture.
+    $script:syntheticFixturesStarted = $true
+    $crossCommunityInsert = Invoke-AppDatabaseQuery @'
+INSERT INTO `elder_profile` (
+    `archive_no`, `community_id`, `name`, `sex`, `address`, `status`, `row_version`,
+    `created_by`, `updated_by`
+)
+VALUES (
+    'SYSHTTP-COMM2-ELDER', 2, '隔离跨社区测试老人', 'UNKNOWN', '隔离测试地址',
+    'ACTIVE', 1, 1, 1
+);
+'@
+    Confirm-That ($crossCommunityInsert.ExitCode -eq 0) 'Could not create the synthetic community-2 elder fixture in the isolated database.'
+    $crossCommunityIdQuery = Invoke-AppDatabaseQuery "SELECT elder_id FROM elder_profile WHERE archive_no = 'SYSHTTP-COMM2-ELDER';"
+    $crossCommunityElderId = 0L
+    $idParsed = [long]::TryParse($crossCommunityIdQuery.StdOut.Trim(), [ref]$crossCommunityElderId)
+    Confirm-Chain 'HTTP 权限矩阵仅在隔离数据库建立社区 2 目标档案' `
+        ($crossCommunityIdQuery.ExitCode -eq 0 -and $idParsed -and $crossCommunityElderId -gt 0) `
+        'Could not read back the synthetic community-2 elder fixture.'
+    $script:syntheticCrossCommunityElderId = $crossCommunityElderId
+
+    $crossCommunityStaffPhone = New-SyntheticPhone
+    $script:syntheticCrossCommunityStaffPhone = $crossCommunityStaffPhone
+    $crossCommunityStaffInsert = Invoke-AppDatabaseQuery @"
+INSERT INTO sys_user (account_kind, phone_normalized, password_hash, status)
+VALUES ('STAFF', '$crossCommunityStaffPhone', 'not-for-login-test-fixture', 'ACTIVE');
+SET @syshttp_cross_staff_id = LAST_INSERT_ID();
+INSERT INTO sys_user_role (user_id, role_code, community_id, status, granted_by, granted_at)
+VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
+"@
+    Confirm-That ($crossCommunityStaffInsert.ExitCode -eq 0) 'Could not create the isolated community-2 staff target.'
+    $crossCommunityStaffQuery = Invoke-AppDatabaseQuery "SELECT user_id FROM sys_user WHERE phone_normalized = '$crossCommunityStaffPhone' AND account_kind = 'STAFF';"
+    $crossCommunityStaffId = 0L
+    $crossStaffIdParsed = [long]::TryParse($crossCommunityStaffQuery.StdOut.Trim(), [ref]$crossCommunityStaffId)
+    Confirm-That ($crossCommunityStaffQuery.ExitCode -eq 0 -and $crossStaffIdParsed -and $crossCommunityStaffId -gt 0) `
+        'Could not read back the isolated community-2 staff target.'
+
     $credentialPath = Join-Path $repoRoot 'docs\current\接口契约_M01_M02.md'
     $accounts = Get-ContractCredentials -ContractPath $credentialPath
     $adminAccount = $null
     $workerAccount = $null
     $childAccount = $null
+    $pendingChildAccount = $null
+    $frozenChildAccount = $null
     $elderAccount = $null
     foreach ($account in $accounts) {
         $clientType = if ($account.Label -match '社区管理员') { 'WEB' } else { 'MINIAPP' }
@@ -724,6 +1004,14 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
             $elderAccount = [pscustomobject]@{ Token = [string]$loginJson.data.token }
         } elseif ($account.Label -match '子女\s*1') {
             $childAccount = [pscustomobject]@{ Token = [string]$loginJson.data.token }
+        } elseif ($account.Label -match '子女\s*2') {
+            $pendingChildAccount = [pscustomobject]@{
+                Token = [string]$loginJson.data.token
+                Phone = [string]$account.Phone
+                Password = [string]$account.Password
+            }
+        } elseif ($account.Label -match '子女\s*3') {
+            $frozenChildAccount = [pscustomobject]@{ Token = [string]$loginJson.data.token }
         }
     }
     Confirm-Chain '契约 §5.1 的六个合成账号全部登录成功且凭据未输出' `
@@ -737,10 +1025,650 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
     Confirm-Chain 'Web 登录设置 HttpOnly 会话 Cookie、提供 CSRF Token 且响应不返回 Bearer Token' $webCookieOk `
         'Web login did not satisfy the expected Cookie/CSRF session contract.'
 
+    $anonymousHttpContext = New-TestHttpClient
+    $workerHttpContext = New-TestHttpClient
+    $staffNegativeStart = Get-StaffMutationSnapshot
+    $anonymousStaffList = Invoke-Api -Method 'GET' -Path '/api/v1/admin/staff' -Client $anonymousHttpContext.Client
+    $anonymousStaffCreate = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -Client $anonymousHttpContext.Client `
+        -IdempotencyKey ('SYSHTTP-ANON-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            phone = New-SyntheticPhone; initialPassword = [Guid]::NewGuid().ToString('N'); roles = @('GRID_WORKER')
+        }
+    $workerStaffList = Invoke-Api -Method 'GET' -Path '/api/v1/admin/staff' -BearerToken $workerAccount.Token -Client $workerHttpContext.Client
+    $workerStaffCreate = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -BearerToken $workerAccount.Token `
+        -Client $workerHttpContext.Client -IdempotencyKey ('SYSHTTP-WORKER-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            phone = New-SyntheticPhone; initialPassword = [Guid]::NewGuid().ToString('N'); roles = @('CARE_WORKER')
+        }
+    $workerStaffReplace = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$($adminAccount.UserId)/roles" `
+        -BearerToken $workerAccount.Token -Client $workerHttpContext.Client `
+        -IdempotencyKey ('SYSHTTP-WORKER-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('GRID_WORKER'); reason = '隔离 HTTP 工作人员越权拒绝' }
+    $staffNegativeEnd = Get-StaffMutationSnapshot
+    Confirm-Chain '匿名员工列表与创建均返回 HTTP 401 且无 DB/session/audit 副作用' `
+        ($anonymousStaffList.StatusCode -eq 401 -and $anonymousStaffCreate.StatusCode -eq 401 -and
+            $staffNegativeStart -eq $staffNegativeEnd) `
+        'Anonymous staff-management requests were not rejected without changing isolated staff/session/audit facts.'
+    Confirm-Chain '网格员员工列表/创建/角色替换均返回 HTTP 403 且无 DB/session/audit 副作用' `
+        ($workerStaffList.StatusCode -eq 403 -and $workerStaffCreate.StatusCode -eq 403 -and
+            $workerStaffReplace.StatusCode -eq 403 -and $staffNegativeStart -eq $staffNegativeEnd) `
+        'A grid worker reached staff-management operations or changed isolated staff/session/audit facts.'
+
+    $missingIdempotencyBefore = Get-StaffMutationSnapshot
+    $missingIdempotencyResponse = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -CsrfToken $adminAccount.Csrf -Body @{
+        phone = New-SyntheticPhone; initialPassword = [Guid]::NewGuid().ToString('N'); roles = @('GRID_WORKER')
+    }
+    $missingIdempotencyAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '员工创建缺少 Idempotency-Key 返回 HTTP 400 且无 DB/session/audit 副作用' `
+        ($missingIdempotencyResponse.StatusCode -eq 400 -and $missingIdempotencyBefore -eq $missingIdempotencyAfter) `
+        'A staff creation without Idempotency-Key was accepted or changed isolated staff/session/audit facts.'
+
+    $staffPhone = New-SyntheticPhone
+    $script:syntheticStaffPhone = $staffPhone
+    $staffPassword = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+    $shortPasswordBefore = Get-StaffMutationSnapshot
+    $shortPasswordResponse = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-SHORT-PASSWORD-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            phone = New-SyntheticPhone; initialPassword = 'short7'; roles = @('GRID_WORKER')
+        }
+    $shortPasswordAfter = Get-StaffMutationSnapshot
+    $shortPasswordNoSideEffects = $shortPasswordBefore -eq $shortPasswordAfter
+    Confirm-Chain '短初始密码返回 HTTP 422 且无 DB/session/audit 副作用' `
+        ($shortPasswordResponse.StatusCode -eq 422 -and $shortPasswordNoSideEffects) `
+        "A short initial password was accepted or changed isolated staff/session/audit facts (HTTP $($shortPasswordResponse.StatusCode), snapshotUnchanged=$shortPasswordNoSideEffects)."
+
+    $invalidRoleBefore = Get-StaffMutationSnapshot
+    $invalidRoleResponse = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-INVALID-ROLE-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            phone = New-SyntheticPhone; initialPassword = $staffPassword; roles = @('MAINTENANCE')
+        }
+    $invalidRoleAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '未知或运维角色返回 HTTP 400 且无 DB/session/audit 副作用' `
+        ($invalidRoleResponse.StatusCode -eq 400 -and $invalidRoleBefore -eq $invalidRoleAfter) `
+        'An unknown or maintenance role was accepted or changed isolated staff/session/audit facts.'
+
+    $familyRoleBefore = Get-StaffMutationSnapshot
+    $familyRoleResponse = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-FAMILY-ROLE-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            phone = New-SyntheticPhone; initialPassword = $staffPassword; roles = @('CHILD')
+        }
+    $familyRoleAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '家庭角色不能用于员工创建且无 DB/session/audit 副作用' `
+        ($familyRoleResponse.StatusCode -eq 400 -and $familyRoleBefore -eq $familyRoleAfter) `
+        'A family role was accepted for staff creation or changed isolated staff/session/audit facts.'
+
+    $lastAdminBefore = Get-StaffMutationSnapshot
+    $lastAdminResponse = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$($adminAccount.UserId)/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-LAST-ADMIN-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @(); reason = '隔离 HTTP 最后管理员保护验收' }
+    $lastAdminAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '撤销最后一个有效管理员返回 HTTP 400 且角色/会话/审计事实不变' `
+        ($lastAdminResponse.StatusCode -eq 400 -and $lastAdminBefore -eq $lastAdminAfter) `
+        'The last active community administrator was removable or the rejected request changed isolated facts.'
+
+    $crossStaffBefore = Get-StaffMutationSnapshot
+    $crossStaffResponse = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$crossCommunityStaffId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-CROSS-STAFF-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('CARE_WORKER'); reason = '隔离 HTTP 跨社区员工越权验收' }
+    $crossStaffAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '跨社区角色替换返回 HTTP 404 且角色/会话/审计事实不变' `
+        ($crossStaffResponse.StatusCode -eq 404 -and $crossStaffBefore -eq $crossStaffAfter) `
+        'A community administrator modified another community staff target or changed isolated staff/session/audit facts.'
+
+    $staffCreateBefore = Get-StaffMutationSnapshot
+    $staffCreateResponse = Invoke-Api -Method 'POST' -Path '/api/v1/admin/staff' -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-STAFF-CREATE-' + [Guid]::NewGuid().ToString('N')) -Body @{
+        phone = $staffPhone
+        initialPassword = $staffPassword
+        roles = @('GRID_WORKER')
+    }
+    $staffCreateJson = Assert-OkApiResponse $staffCreateResponse 'Community administrator staff creation' 201
+    $staffTargetUserId = [long]$staffCreateJson.data.userId
+    $script:syntheticStaffUserIds.Add($staffTargetUserId)
+    $staffCreateAfter = Get-StaffMutationSnapshot
+    $expectedMaskedPhone = $staffPhone.Substring(0, 3) + '****' + $staffPhone.Substring($staffPhone.Length - 4)
+    Confirm-Chain '员工 API 创建返回 HTTP 201 且仅返回脱敏字段' `
+        ($staffTargetUserId -gt 0 -and [string]$staffCreateJson.data.maskedPhone -eq $expectedMaskedPhone -and
+            [string]$staffCreateJson.data.accountStatus -eq 'ACTIVE' -and
+            @($staffCreateJson.data.roleCodes | Where-Object { $_ -eq 'GRID_WORKER' }).Count -eq 1 -and
+            -not $staffCreateResponse.Content.Contains($staffPhone) -and
+            -not $staffCreateResponse.Content.Contains($staffPassword) -and $staffCreateBefore -ne $staffCreateAfter) `
+        'POST /api/v1/admin/staff did not return a sanitized HTTP 201 response.'
+
+    $staffCreateAuditLine = Get-StaffAuditFacts -UserId $staffTargetUserId -Action 'STAFF_CREATED'
+    $staffCreateAuditParts = $staffCreateAuditLine -split '\|', 8
+    $staffCreateAuditDetails = if ($staffCreateAuditParts.Count -eq 8) { ConvertFrom-Json -InputObject $staffCreateAuditParts[7] } else { $null }
+    Confirm-Chain '员工创建审计包含当前管理员、社区、目标和初始角色且不含密码' `
+        ($staffCreateAuditParts.Count -eq 8 -and $staffCreateAuditParts[0] -eq [string]$adminAccount.UserId -and
+            $staffCreateAuditParts[1] -eq 'COMMUNITY_ADMIN' -and $staffCreateAuditParts[2] -eq '1' -and
+            $staffCreateAuditParts[3] -eq 'STAFF' -and $staffCreateAuditParts[4] -eq [string]$staffTargetUserId -and
+            $staffCreateAuditParts[5] -eq 'STAFF_CREATED' -and $staffCreateAuditParts[6] -eq 'SUCCESS' -and
+            $staffCreateAuditDetails.afterRoles.Count -eq 1 -and $staffCreateAuditDetails.afterRoles[0] -eq 'GRID_WORKER' -and
+            -not $staffCreateAuditLine.Contains($staffPassword)) `
+        'Staff creation audit facts did not match the authorized actor/community/target/roles boundary.'
+
+    $staffListResponse = Invoke-Api -Method 'GET' -Path '/api/v1/admin/staff'
+    $staffListJson = Assert-OkApiResponse $staffListResponse 'Community staff list'
+    $staffListTarget = @($staffListJson.data | Where-Object { [long]$_.userId -eq $staffTargetUserId })
+    $staffListCrossTarget = @($staffListJson.data | Where-Object { [long]$_.userId -eq $crossCommunityStaffId })
+    Confirm-Chain '员工列表只返回本社区员工并显示新账号角色' `
+        ($staffListTarget.Count -eq 1 -and $staffListCrossTarget.Count -eq 0 -and
+            [string]$staffListTarget[0].maskedPhone -eq $expectedMaskedPhone -and
+            @($staffListTarget[0].roleCodes | Where-Object { $_ -eq 'GRID_WORKER' }).Count -eq 1 -and
+            -not $staffListResponse.Content.Contains($staffPhone)) `
+        'GET /api/v1/admin/staff exposed a cross-community account or failed to return the created staff summary.'
+
+    $adminGridUpdate = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-ADMIN-GRID-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('COMMUNITY_ADMIN', 'GRID_WORKER'); reason = '隔离 HTTP 管理员兼任网格员验收' }
+    $adminGridJson = Assert-OkApiResponse $adminGridUpdate 'Administrator plus grid-worker role replacement'
+    $adminGridRoles = @((Get-ActiveStaffRoles -UserId $staffTargetUserId) -split ',')
+    Confirm-Chain '员工 API 允许 COMMUNITY_ADMIN + GRID_WORKER' `
+        (@($adminGridJson.data.roleCodes | Where-Object { $_ -in @('COMMUNITY_ADMIN', 'GRID_WORKER') }).Count -eq 2 -and
+            $adminGridRoles.Count -eq 2 -and $adminGridRoles -contains 'COMMUNITY_ADMIN' -and $adminGridRoles -contains 'GRID_WORKER') `
+        'The staff API did not persist the allowed COMMUNITY_ADMIN + GRID_WORKER combination.'
+
+    $adminCareUpdate = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-ADMIN-CARE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('COMMUNITY_ADMIN', 'CARE_WORKER'); reason = '隔离 HTTP 管理员兼任护工验收' }
+    $adminCareJson = Assert-OkApiResponse $adminCareUpdate 'Administrator plus care-worker role replacement'
+    $adminCareRoles = @((Get-ActiveStaffRoles -UserId $staffTargetUserId) -split ',')
+    Confirm-Chain '员工 API 允许 COMMUNITY_ADMIN + CARE_WORKER' `
+        (@($adminCareJson.data.roleCodes | Where-Object { $_ -in @('COMMUNITY_ADMIN', 'CARE_WORKER') }).Count -eq 2 -and
+            $adminCareRoles.Count -eq 2 -and $adminCareRoles -contains 'COMMUNITY_ADMIN' -and $adminCareRoles -contains 'CARE_WORKER') `
+        'The staff API did not persist the allowed COMMUNITY_ADMIN + CARE_WORKER combination.'
+
+    $invalidCombinationBefore = Get-StaffMutationSnapshot
+    $invalidCombination = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-GRID-CARE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('GRID_WORKER', 'CARE_WORKER'); reason = '隔离 HTTP 互斥角色验收' }
+    $invalidCombinationAfter = Get-StaffMutationSnapshot
+    Confirm-Chain '员工 API 拒绝 GRID_WORKER + CARE_WORKER 且无 DB/session/audit 副作用' `
+        ($invalidCombination.StatusCode -eq 400 -and $invalidCombinationBefore -eq $invalidCombinationAfter) `
+        'The mutually exclusive GRID_WORKER + CARE_WORKER combination was accepted or changed isolated facts.'
+
+    $adminCareAuditLine = Get-StaffAuditFacts -UserId $staffTargetUserId -Action 'STAFF_ROLES_REPLACED'
+    $adminCareAuditParts = $adminCareAuditLine -split '\|', 8
+    $adminCareAuditDetails = if ($adminCareAuditParts.Count -eq 8) { ConvertFrom-Json -InputObject $adminCareAuditParts[7] } else { $null }
+    $adminCareAuditIdentityOk = $adminCareAuditParts.Count -eq 8 -and $adminCareAuditParts[0] -eq [string]$adminAccount.UserId -and
+        $adminCareAuditParts[1] -eq 'COMMUNITY_ADMIN' -and $adminCareAuditParts[2] -eq '1' -and
+        $adminCareAuditParts[3] -eq 'STAFF' -and $adminCareAuditParts[4] -eq [string]$staffTargetUserId -and
+        $adminCareAuditParts[5] -eq 'STAFF_ROLES_REPLACED' -and $adminCareAuditParts[6] -eq 'SUCCESS'
+    $adminCareAuditBeforeRoleCount = @($adminCareAuditDetails.beforeRoles | Where-Object { $_ -in @('COMMUNITY_ADMIN', 'GRID_WORKER') }).Count
+    $adminCareAuditAfterRoleCount = @($adminCareAuditDetails.afterRoles | Where-Object { $_ -in @('COMMUNITY_ADMIN', 'CARE_WORKER') }).Count
+    $adminCareAuditReasonMatches = [string]$adminCareAuditDetails.reason -eq '隔离 HTTP 管理员兼任护工验收'
+    $adminCareAuditOk = $adminCareAuditIdentityOk -and $adminCareAuditBeforeRoleCount -eq 2 -and
+        $adminCareAuditAfterRoleCount -eq 2 -and $adminCareAuditReasonMatches
+    Confirm-Chain '角色替换审计包含 actor/community/target、前后角色和原因' `
+        $adminCareAuditOk `
+        "Staff role replacement audit mismatch (parts=$($adminCareAuditParts.Count), identity=$adminCareAuditIdentityOk, beforeRoles=$adminCareAuditBeforeRoleCount, afterRoles=$adminCareAuditAfterRoleCount, reasonMatch=$adminCareAuditReasonMatches, reason=$([string]$adminCareAuditDetails.reason))."
+
+    $staffWebContext = New-TestHttpClient
+    $staffMiniContext = New-TestHttpClient
+    $staffWebLoginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $staffWebContext.Client -Body @{
+        phone = $staffPhone; password = $staffPassword; clientType = 'WEB'
+    }
+    $staffWebLoginJson = Assert-OkApiResponse $staffWebLoginResponse 'Synthetic staff Web login'
+    $staffMiniLoginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $staffMiniContext.Client -Body @{
+        phone = $staffPhone; password = $staffPassword; clientType = 'MINIAPP'
+    }
+    $staffMiniLoginJson = Assert-OkApiResponse $staffMiniLoginResponse 'Synthetic staff MINIAPP login'
+    $staffMiniToken = [string]$staffMiniLoginJson.data.token
+    $staffWebCookies = @($staffWebContext.Cookies.GetCookies([Uri]($script:apiBase + '/api/v1/auth/login')) |
+        Where-Object { $_.Name -eq 'SESSION_TOKEN' })
+    $staffWebCurrentBefore = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
+    $staffMiniCurrentBefore = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
+    $targetSessionsBefore = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    Confirm-Chain '合成员工 Web Cookie 与 MINIAPP Bearer 会话均可独立认证' `
+        ($staffWebCookies.Count -eq 1 -and $null -eq $staffWebLoginJson.data.token -and $staffMiniToken.Length -gt 0 -and
+            $staffWebCurrentBefore.StatusCode -eq 200 -and $staffMiniCurrentBefore.StatusCode -eq 200 -and
+            $targetSessionsBefore.Count -eq 4 -and $targetSessionsBefore[0] -eq '2' -and $targetSessionsBefore[1] -eq '2') `
+        'Synthetic staff Web and MINIAPP sessions were not independently established in the isolated API.'
+
+    $revokeSessionsResponse = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-REVOKE-SESSIONS-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('GRID_WORKER'); reason = '隔离旧 token 撤销验收' }
+    $null = Assert-OkApiResponse $revokeSessionsResponse 'Synthetic staff role removal and session revocation'
+    $targetSessionsRevoked = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    $staffWebOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
+    $staffMiniOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
+    Confirm-Chain 'API 角色变更撤销目标全部 Web/MINIAPP 会话并标记 ROLE_CHANGED' `
+        ($targetSessionsRevoked.Count -eq 4 -and $targetSessionsRevoked[0] -eq '2' -and
+            $targetSessionsRevoked[1] -eq '0' -and $targetSessionsRevoked[2] -eq '2') `
+        'The API-driven role change did not revoke every target session with ROLE_CHANGED.'
+    Confirm-Chain 'API 角色变更后旧 Web Cookie 与 MINIAPP Bearer 均返回 HTTP 401' `
+        ($staffWebOldTokenResponse.StatusCode -eq 401 -and $staffMiniOldTokenResponse.StatusCode -eq 401) `
+        'A staff Web Cookie or MINIAPP Bearer Token remained valid after the API-driven role change.'
+
+    $revokeAuditLine = Get-StaffAuditFacts -UserId $staffTargetUserId -Action 'STAFF_ROLES_REPLACED'
+    $revokeAuditParts = $revokeAuditLine -split '\|', 8
+    $revokeAuditDetails = if ($revokeAuditParts.Count -eq 8) { ConvertFrom-Json -InputObject $revokeAuditParts[7] } else { $null }
+    Confirm-Chain '角色撤销审计记录社区、目标、前后角色和指定原因' `
+        ($revokeAuditParts.Count -eq 8 -and $revokeAuditParts[0] -eq [string]$adminAccount.UserId -and
+            $revokeAuditParts[1] -eq 'COMMUNITY_ADMIN' -and $revokeAuditParts[2] -eq '1' -and
+            $revokeAuditParts[3] -eq 'STAFF' -and $revokeAuditParts[4] -eq [string]$staffTargetUserId -and
+            @($revokeAuditDetails.beforeRoles | Where-Object { $_ -in @('COMMUNITY_ADMIN', 'CARE_WORKER') }).Count -eq 2 -and
+            $revokeAuditDetails.afterRoles.Count -eq 1 -and $revokeAuditDetails.afterRoles[0] -eq 'GRID_WORKER' -and
+            [string]$revokeAuditDetails.reason -eq '隔离旧 token 撤销验收') `
+        'The role-change audit did not preserve the actor, community, target, before/after roles, and reason.'
+
+    $staffRegrantResponse = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-REGRANT-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('COMMUNITY_ADMIN', 'CARE_WORKER'); reason = '隔离角色重新授予验收' }
+    $null = Assert-OkApiResponse $staffRegrantResponse 'Synthetic staff role regrant'
+    $targetSessionsAfterRegrant = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    $staffWebOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
+    $staffMiniOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
+    Confirm-Chain '重新授予角色后旧 Web Cookie 与 MINIAPP Bearer 仍返回 HTTP 401' `
+        ($staffWebOldAfterRegrant.StatusCode -eq 401 -and $staffMiniOldAfterRegrant.StatusCode -eq 401 -and
+            $targetSessionsAfterRegrant.Count -eq 4 -and $targetSessionsAfterRegrant[1] -eq '0' -and
+            $targetSessionsAfterRegrant[2] -eq '2') `
+        'Regranting roles revived an old target token or reactivated a revoked server-side session.'
+
+    $familyPhone = New-SyntheticPhone
+    $script:syntheticFamilyPhone = $familyPhone
+    $familyTicketId = [Guid]::NewGuid().ToString()
+    $script:syntheticFamilyTicketId = $familyTicketId
+    $familyArchiveNo = 'SYSHTTP-FAM-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+    $script:syntheticFamilyArchiveNo = $familyArchiveNo
+    $familyFixtureInsert = Invoke-AppDatabaseQuery @"
+INSERT INTO sys_user (account_kind, phone_normalized, password_hash, status)
+SELECT 'FAMILY', '$familyPhone', password_hash, 'ACTIVE' FROM sys_user WHERE user_id = 4;
+SET @syshttp_family_user_id = LAST_INSERT_ID();
+INSERT INTO sys_user_role (user_id, role_code, community_id, status, granted_by, granted_at)
+VALUES
+    (@syshttp_family_user_id, 'CHILD', NULL, 'ACTIVE', 1, NOW(3)),
+    (@syshttp_family_user_id, 'ELDER', NULL, 'ACTIVE', 1, NOW(3));
+INSERT INTO elder_profile (archive_no, community_id, name, sex, address, status, row_version, created_by, updated_by)
+VALUES ('$familyArchiveNo', 1, '隔离多角色老人', 'UNKNOWN', '隔离测试地址', 'ACTIVE', 1, 1, 1);
+SET @syshttp_family_elder_id = LAST_INSERT_ID();
+INSERT INTO elder_activation_ticket (
+    ticket_id, elder_id, code_mac, status, issued_by, issued_at, expires_at, used_at, used_by_user_id
+)
+VALUES (
+    '$familyTicketId', @syshttp_family_elder_id, UNHEX(SHA2('$familyTicketId', 256)),
+    'USED', 1, NOW(3), DATE_ADD(NOW(3), INTERVAL 1 DAY), NOW(3), @syshttp_family_user_id
+);
+INSERT INTO elder_identity_link (elder_id, user_id, linked_by_activation_ticket_id)
+VALUES (@syshttp_family_elder_id, @syshttp_family_user_id, '$familyTicketId');
+INSERT INTO elder_family_link (elder_id, child_user_id, status, link_generation, row_version)
+VALUES (@syshttp_family_elder_id, @syshttp_family_user_id, 'ACTIVE', 1, 1);
+SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
+"@
+    Confirm-That ($familyFixtureInsert.ExitCode -eq 0) 'Could not provision the isolated FAMILY CHILD+ELDER fixture and activation-ticket FK.'
+    $familyFixtureParts = $familyFixtureInsert.StdOut.Trim() -split '\|', 2
+    $script:syntheticFamilyUserId = 0L
+    $script:syntheticFamilyElderId = 0L
+    $familyUserParsed = $familyFixtureParts.Count -eq 2 -and [long]::TryParse($familyFixtureParts[0], [ref]$script:syntheticFamilyUserId)
+    $familyElderParsed = $familyFixtureParts.Count -eq 2 -and [long]::TryParse($familyFixtureParts[1], [ref]$script:syntheticFamilyElderId)
+    Confirm-That ($familyUserParsed -and $familyElderParsed -and $script:syntheticFamilyUserId -gt 0 -and $script:syntheticFamilyElderId -gt 0) `
+        'Could not read back the isolated FAMILY identity fixture IDs.'
+
+    $childOneCredential = $accounts | Where-Object { $_.Label -match '子女\s*1' } | Select-Object -First 1
+    $familyClientContext = New-TestHttpClient
+    $familyLoginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $familyClientContext.Client -Body @{
+        phone = $familyPhone; password = [string]$childOneCredential.Password; clientType = 'MINIAPP'
+    }
+    $familyLoginJson = Assert-OkApiResponse $familyLoginResponse 'Synthetic multi-role FAMILY login'
+    $familyToken = [string]$familyLoginJson.data.token
+    $familyInitialRoles = @($familyLoginJson.data.roles)
+    $familyChildScopeBefore = Get-IsolatedTestSideEffectSnapshot
+    $familyIdentityFactsBefore = Get-FamilyIdentityFacts -UserId $script:syntheticFamilyUserId `
+        -ElderId $script:syntheticFamilyElderId -TicketId $familyTicketId
+    $familyChildListResponse = Invoke-Api -Method 'GET' -Path '/api/v1/family/links/my-elders' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    $familyChildListJson = Assert-OkApiResponse $familyChildListResponse 'Synthetic FAMILY child-link scope'
+    $familyChildListTargets = @($familyChildListJson.data | Where-Object { [long]$_.elderId -eq $script:syntheticFamilyElderId })
+    $familyProfileAsChild = Invoke-Api -Method 'GET' -Path '/api/v1/elder/profile/me' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    Confirm-Chain '预置 FAMILY CHILD+ELDER 登录先进入 CHILD 独立关系范围' `
+        ($familyInitialRoles -contains 'CHILD' -and $familyInitialRoles -contains 'ELDER' -and
+            [string]$familyLoginJson.data.activeRole -eq 'CHILD' -and $familyChildListTargets.Count -eq 1 -and
+            $familyProfileAsChild.StatusCode -eq 403) `
+        'The synthetic FAMILY account did not start with an independent CHILD scope.'
+
+    $familySwitchToElder = Invoke-Api -Method 'POST' -Path '/api/v1/auth/switch-role' -BearerToken $familyToken `
+        -Client $familyClientContext.Client -Body @{ targetRoleCode = 'ELDER' }
+    $familySwitchToElderJson = Assert-OkApiResponse $familySwitchToElder 'Synthetic FAMILY switch to ELDER'
+    $familyElderCurrentResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    $familyElderCurrentJson = Assert-OkApiResponse $familyElderCurrentResponse 'Synthetic FAMILY current ELDER role'
+    $familyElderProfileResponse = Invoke-Api -Method 'GET' -Path '/api/v1/elder/profile/me' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    $familyElderProfileJson = Assert-OkApiResponse $familyElderProfileResponse 'Synthetic FAMILY elder-identity scope'
+    $familyChildListAsElder = Invoke-Api -Method 'GET' -Path '/api/v1/family/links/my-elders' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    Confirm-Chain '切换 ELDER 后只读取 elder_identity_link 指向的本人档案' `
+        ([string]$familySwitchToElderJson.data.activeRole -eq 'ELDER' -and
+            [string]$familyElderCurrentJson.data.currentRole -eq 'ELDER' -and
+            [long]$familyElderProfileJson.data.elderId -eq $script:syntheticFamilyElderId -and
+            $familyChildListAsElder.StatusCode -eq 403) `
+        'Switching to ELDER did not isolate the elder identity from the CHILD relationship endpoint.'
+
+    $familySwitchToChild = Invoke-Api -Method 'POST' -Path '/api/v1/auth/switch-role' -BearerToken $familyToken `
+        -Client $familyClientContext.Client -Body @{ targetRoleCode = 'CHILD' }
+    $familySwitchToChildJson = Assert-OkApiResponse $familySwitchToChild 'Synthetic FAMILY switch back to CHILD'
+    $familyChildListAfterSwitch = Invoke-Api -Method 'GET' -Path '/api/v1/family/links/my-elders' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    $familyChildListAfterSwitchJson = Assert-OkApiResponse $familyChildListAfterSwitch 'Synthetic FAMILY child scope after role switch'
+    $familyProfileAfterSwitch = Invoke-Api -Method 'GET' -Path '/api/v1/elder/profile/me' `
+        -BearerToken $familyToken -Client $familyClientContext.Client
+    $familyChildListAfterTargets = @($familyChildListAfterSwitchJson.data | Where-Object { [long]$_.elderId -eq $script:syntheticFamilyElderId })
+    $familyChildScopeAfter = Get-IsolatedTestSideEffectSnapshot
+    $familyIdentityFactsAfter = Get-FamilyIdentityFacts -UserId $script:syntheticFamilyUserId `
+        -ElderId $script:syntheticFamilyElderId -TicketId $familyTicketId
+    Confirm-Chain '切回 CHILD 后亲情关系范围保留且不继承 ELDER 本人范围' `
+        ([string]$familySwitchToChildJson.data.activeRole -eq 'CHILD' -and $familyChildListAfterTargets.Count -eq 1 -and
+            $familyProfileAfterSwitch.StatusCode -eq 403 -and $familyChildScopeBefore -eq $familyChildScopeAfter -and
+            $familyIdentityFactsBefore -eq $familyIdentityFactsAfter) `
+        'Switching back to CHILD changed the independent family-link or elder-identity fixture facts.'
+
+    $careHttpContext = New-TestHttpClient
+    $careLoginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $careHttpContext.Client -Body @{
+        phone = $staffPhone; password = $staffPassword; clientType = 'MINIAPP'
+    }
+    $careLoginJson = Assert-OkApiResponse $careLoginResponse 'Synthetic care-worker login'
+    $careToken = [string]$careLoginJson.data.token
+    $careSwitchResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/switch-role' -BearerToken $careToken `
+        -Client $careHttpContext.Client -Body @{ targetRoleCode = 'CARE_WORKER' }
+    $careSwitchJson = Assert-OkApiResponse $careSwitchResponse 'Synthetic switch to CARE_WORKER'
+    $careCurrentResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $careToken -Client $careHttpContext.Client
+    $careCurrentJson = Assert-OkApiResponse $careCurrentResponse 'Synthetic CARE_WORKER current-user read'
+    Confirm-Chain '合成员工可切换到社区内 CARE_WORKER 会话' `
+        ([string]$careLoginJson.data.accountKind -eq 'STAFF' -and
+            [string]$careSwitchJson.data.activeRole -eq 'CARE_WORKER' -and
+            [string]$careCurrentJson.data.currentRole -eq 'CARE_WORKER' -and
+            [string]$careCurrentJson.data.communityId -eq '1') `
+        'The synthetic staff session did not enter the expected same-community CARE_WORKER scope.'
+
+    $careWorkOrderId = New-SyntheticWorkOrder -Status 'DISPATCHED' -AssigneeId $staffTargetUserId -ElderId 1 -CommunityId 1
+    $careNonAssigneeOrderId = New-SyntheticWorkOrder -Status 'DISPATCHED' -AssigneeId $workerAccount.UserId -ElderId 1 -CommunityId 1
+    $careReassignedOrderId = New-SyntheticWorkOrder -Status 'DISPATCHED' -AssigneeId $staffTargetUserId -ElderId 1 -CommunityId 1
+    $careCrossCommunityOrderId = New-SyntheticWorkOrder -Status 'DISPATCHED' -AssigneeId $staffTargetUserId `
+        -ElderId $crossCommunityElderId -CommunityId 2
+    $terminalCareOrderIds = [ordered]@{}
+    foreach ($terminalStatus in @('CLOSED', 'VOIDED', 'TERMINATED_PRE_ACCEPTANCE', 'SERVICE_STOPPED')) {
+        $terminalCareOrderIds[$terminalStatus] = New-SyntheticWorkOrder -Status $terminalStatus `
+            -AssigneeId $staffTargetUserId -ElderId 1 -CommunityId 1
+    }
+    $careEvidencePath = Join-Path $tempRoot 'system-http-care-evidence.png'
+    $careEvidenceBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l5sAAAAASUVORK5CYII=')
+    [IO.File]::WriteAllBytes($careEvidencePath, $careEvidenceBytes)
+
+    $missingOrderFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $missingOrderFileCountBefore = Get-StorageFileCount
+    $missingOrderUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken -Client $careHttpContext.Client
+    $missingOrderFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $missingOrderFileCountAfter = Get-StorageFileCount
+    $missingOrderFactsUnchanged = $missingOrderFactsBefore -eq $missingOrderFactsAfter
+    $missingOrderFilesUnchanged = $missingOrderFileCountBefore -eq $missingOrderFileCountAfter
+    Confirm-Chain '护工缺少 workOrderId 上传返回 HTTP 422 且无 DB/session/audit/文件副作用' `
+        ($missingOrderUpload.StatusCode -eq 422 -and $missingOrderFactsUnchanged -and
+            $missingOrderFilesUnchanged) `
+        "A care-worker upload without workOrderId was not rejected without writes (HTTP $($missingOrderUpload.StatusCode), dbSnapshotUnchanged=$missingOrderFactsUnchanged, filesUnchanged=$missingOrderFilesUnchanged)."
+
+    foreach ($terminalStatus in $terminalCareOrderIds.Keys) {
+        $terminalId = [long]$terminalCareOrderIds[$terminalStatus]
+        $terminalListResponse = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/my-tasks?status=$terminalStatus" `
+            -BearerToken $careToken -Client $careHttpContext.Client
+        $terminalListJson = Assert-OkApiResponse $terminalListResponse "CARE_WORKER terminal list $terminalStatus"
+        $terminalListed = @($terminalListJson.data | Where-Object { [long]$_.workOrderId -eq $terminalId }).Count -gt 0
+        $terminalDetailResponse = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$terminalId" `
+            -BearerToken $careToken -Client $careHttpContext.Client
+        $terminalFactsBefore = Get-IsolatedTestSideEffectSnapshot
+        $terminalFileCountBefore = Get-StorageFileCount
+        $terminalUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
+            -WorkOrderId $terminalId -Client $careHttpContext.Client
+        $terminalFactsAfter = Get-IsolatedTestSideEffectSnapshot
+        $terminalFileCountAfter = Get-StorageFileCount
+        Confirm-Chain "护工终态 $terminalStatus 即使保留承接人也不可列出/读取/上传" `
+            (-not $terminalListed -and $terminalDetailResponse.StatusCode -eq 404 -and $terminalUpload.StatusCode -eq 404 -and
+                $terminalFactsBefore -eq $terminalFactsAfter -and $terminalFileCountBefore -eq $terminalFileCountAfter) `
+            "A terminal $terminalStatus care order remained visible or its denied upload wrote isolated state/file data."
+    }
+
+    $nonAssigneeDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careNonAssigneeOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $nonAssigneeFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $nonAssigneeFileCountBefore = Get-StorageFileCount
+    $nonAssigneeUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
+        -WorkOrderId $careNonAssigneeOrderId -Client $careHttpContext.Client
+    $nonAssigneeFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $nonAssigneeFileCountAfter = Get-StorageFileCount
+    Confirm-Chain '护工不可读取或上传非本人承接工单且无副作用/文件写入' `
+        ($nonAssigneeDetail.StatusCode -eq 404 -and $nonAssigneeUpload.StatusCode -eq 404 -and
+            $nonAssigneeFactsBefore -eq $nonAssigneeFactsAfter -and $nonAssigneeFileCountBefore -eq $nonAssigneeFileCountAfter) `
+        'A care worker accessed another worker order or its denied upload wrote isolated state/file data.'
+
+    $reassignResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careReassignedOrderId/dispatch" `
+        -CsrfToken $adminAccount.Csrf -Body @{ assigneeUserId = $workerAccount.UserId; reason = '隔离 HTTP 护工工单改派验收' }
+    $null = Assert-OkApiResponse $reassignResponse 'Administrator reassignment from care worker to grid worker'
+    $reassignedAssignee = Invoke-AppDatabaseQuery "SELECT current_assignee_id FROM work_order WHERE work_order_id = $careReassignedOrderId;"
+    $reassignedCareDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careReassignedOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $reassignedFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $reassignedFileCountBefore = Get-StorageFileCount
+    $reassignedUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
+        -WorkOrderId $careReassignedOrderId -Client $careHttpContext.Client
+    $reassignedFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $reassignedFileCountAfter = Get-StorageFileCount
+    Confirm-Chain '工单经管理员改派后原护工不可读取/上传且不写文件' `
+        ($reassignedAssignee.ExitCode -eq 0 -and $reassignedAssignee.StdOut.Trim() -eq [string]$workerAccount.UserId -and
+            $reassignedCareDetail.StatusCode -eq 404 -and $reassignedUpload.StatusCode -eq 404 -and
+            $reassignedFactsBefore -eq $reassignedFactsAfter -and $reassignedFileCountBefore -eq $reassignedFileCountAfter) `
+        'A reassigned care worker retained access or the denied upload wrote isolated state/file data.'
+
+    $crossCommunityCareDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careCrossCommunityOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $crossCareFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $crossCareFileCountBefore = Get-StorageFileCount
+    $crossCommunityCareUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
+        -WorkOrderId $careCrossCommunityOrderId -Client $careHttpContext.Client
+    $crossCareFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $crossCareFileCountAfter = Get-StorageFileCount
+    Confirm-Chain '护工跨社区工单读取/上传均拒绝且无 DB/session/audit/文件副作用' `
+        ($crossCommunityCareDetail.StatusCode -eq 404 -and $crossCommunityCareUpload.StatusCode -eq 404 -and
+            $crossCareFactsBefore -eq $crossCareFactsAfter -and $crossCareFileCountBefore -eq $crossCareFileCountAfter) `
+        'A care worker accessed a different-community order or its denied upload wrote isolated state/file data.'
+
+    $careArchiveFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $careArchiveFileCountBefore = Get-StorageFileCount
+    $careArchiveList = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives' -BearerToken $careToken -Client $careHttpContext.Client
+    $careArchiveDetail = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1' -BearerToken $careToken -Client $careHttpContext.Client
+    $careDashboard = Invoke-Api -Method 'GET' -Path '/api/v1/dashboard/community/summary' -BearerToken $careToken -Client $careHttpContext.Client
+    $careArchiveFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $careArchiveFileCountAfter = Get-StorageFileCount
+    Confirm-Chain '护工档案列表/档案详情/社区看板均返回 HTTP 403 且无状态或文件写入' `
+        ($careArchiveList.StatusCode -eq 403 -and $careArchiveDetail.StatusCode -eq 403 -and $careDashboard.StatusCode -eq 403 -and
+            $careArchiveFactsBefore -eq $careArchiveFactsAfter -and $careArchiveFileCountBefore -eq $careArchiveFileCountAfter) `
+        'A care worker reached community archive/dashboard data or changed isolated state/file data.'
+
+    $careMyTasksResponse = Invoke-Api -Method 'GET' -Path '/api/v1/work-orders/my-tasks' -BearerToken $careToken -Client $careHttpContext.Client
+    $careMyTasksJson = Assert-OkApiResponse $careMyTasksResponse 'CARE_WORKER assigned work-order list'
+    $careListedActiveOrder = @($careMyTasksJson.data | Where-Object { [long]$_.workOrderId -eq $careWorkOrderId })
+    $careOrderDetailResponse = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $careOrderDetailJson = Assert-OkApiResponse $careOrderDetailResponse 'CARE_WORKER assigned work-order detail'
+    Confirm-Chain '护工仅在本人待办列表读取当前分配工单的执行字段' `
+        ($careListedActiveOrder.Count -eq 1 -and [long]$careOrderDetailJson.data.workOrderId -eq $careWorkOrderId -and
+            [string]$careOrderDetailJson.data.status -eq 'DISPATCHED' -and
+            $null -eq $careOrderDetailJson.data.elderId -and $null -eq $careOrderDetailJson.data.contactPhone) `
+        'The current care worker did not read the assigned order or its response contained unrelated elder fields.'
+
+    $careAcceptResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/accept" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $null = Assert-OkApiResponse $careAcceptResponse 'CARE_WORKER accept assigned work order'
+    $careAcceptedDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $careAcceptedJson = Assert-OkApiResponse $careAcceptedDetail 'CARE_WORKER accepted work-order readback'
+    Confirm-Chain '护工接单后工单状态为 ACCEPTED' ([string]$careAcceptedJson.data.status -eq 'ACCEPTED') `
+        'The assigned care order did not transition to ACCEPTED.'
+
+    $careStartResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/start" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $null = Assert-OkApiResponse $careStartResponse 'CARE_WORKER start assigned work order'
+    $careProcessingDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $careProcessingJson = Assert-OkApiResponse $careProcessingDetail 'CARE_WORKER processing work-order readback'
+    Confirm-Chain '护工开始服务后工单状态为 PROCESSING' ([string]$careProcessingJson.data.status -eq 'PROCESSING') `
+        'The assigned care order did not transition to PROCESSING.'
+
+    $careFileCountBefore = Get-StorageFileCount
+    $careUploadResponse = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
+        -WorkOrderId $careWorkOrderId -Client $careHttpContext.Client
+    $careUploadJson = Assert-OkApiResponse $careUploadResponse 'CARE_WORKER order-bound evidence upload'
+    $carePhotoUrl = [string]$careUploadJson.data.url
+    $careFileCountAfter = Get-StorageFileCount
+    $carePhotoView = if ($carePhotoUrl) { Invoke-Api -Method 'GET' -Path $carePhotoUrl -Client $careHttpContext.Client } else { $null }
+    Confirm-Chain '护工使用 workOrderId 成功上传凭据且文件写入隔离 APP_STORAGE_ROOT' `
+        ($carePhotoUrl -match '^/api/v1/files/view/[^/]+\.png$' -and
+            [string]$careUploadJson.data.filename -match '^[A-Fa-f0-9]+\.png$' -and
+            $careFileCountAfter -eq ($careFileCountBefore + 1) -and $null -ne $carePhotoView -and $carePhotoView.StatusCode -eq 200) `
+        'A valid order-bound care-worker upload did not create exactly one readable file under isolated storage.'
+
+    $careExecutionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/execution" `
+        -BearerToken $careToken -Client $careHttpContext.Client -Body @{
+            resultSummary = '隔离护工 HTTP 验收已完成。'; photoUrls = @($carePhotoUrl); isExemptPhoto = $false
+        }
+    $null = Assert-OkApiResponse $careExecutionResponse 'CARE_WORKER execution submission'
+    $careExecutionDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
+        -BearerToken $careToken -Client $careHttpContext.Client
+    $careExecutionJson = Assert-OkApiResponse $careExecutionDetail 'CARE_WORKER execution readback'
+    Confirm-Chain '护工提交执行摘要与上传照片后进入 PENDING_RESULT_REVIEW' `
+        ([string]$careExecutionJson.data.status -eq 'PENDING_RESULT_REVIEW' -and
+            @($careExecutionJson.data.photoUrls | Where-Object { $_ -eq $carePhotoUrl }).Count -eq 1) `
+        'The care worker execution result did not persist the uploaded evidence and pending-review status.'
+
     $webUnsafePath = '/api/v1/admin/reservations/0/confirm'
     $missingCsrfResponse = Invoke-Api -Method 'POST' -Path $webUnsafePath
     Confirm-Chain 'Web Cookie 写请求缺少 CSRF Token 时返回 HTTP 403' ($missingCsrfResponse.StatusCode -eq 403) `
         'A cookie-authenticated unsafe request without CSRF did not return HTTP 403.'
+
+    $activeChildElderRead = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1' -BearerToken $childAccount.Token
+    $activeChildElderJson = Assert-OkApiResponse $activeChildElderRead 'Active child bound elder read'
+    Confirm-Chain '有效子女通过 HTTP 读取已绑定老人档案' `
+        ([string]$activeChildElderJson.data.elderId -eq '1') `
+        'The active child could not read the elder attached by an active family link.'
+
+    $pendingReadFacts = Get-IsolatedBusinessFacts
+    $pendingReadResponse = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1' -BearerToken $pendingChildAccount.Token
+    $pendingReadAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '待审核子女读取老人档案返回 HTTP 404' ($pendingReadResponse.StatusCode -eq 404) `
+        'A pending family relationship did not receive the documented inaccessible-resource HTTP 404.'
+    Confirm-Chain '待审核子女档案读取没有业务数据副作用' ($pendingReadFacts -eq $pendingReadAfterFacts) `
+        'A denied pending-child read changed isolated business facts.'
+
+    $pendingReservationFacts = Get-IsolatedBusinessFacts
+    $pendingReservationDate = ([TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time'))).AddDays(60).ToString('yyyy-MM-dd')
+    $pendingReservationResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' -BearerToken $pendingChildAccount.Token -Body @{
+        elderId = 1
+        serviceType = 'DAILY_CARE'
+        serviceDate = $pendingReservationDate
+        slotCode = 'MORNING'
+        serviceAddress = '隔离负例测试地址'
+        specialNotes = 'PENDING-AUTH-NEGATIVE-' + [Guid]::NewGuid().ToString('N')
+    }
+    $pendingReservationAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '待审核子女创建预约返回 HTTP 404' ($pendingReservationResponse.StatusCode -eq 404) `
+        'A pending child relationship was allowed to create a reservation or returned the wrong HTTP status.'
+    Confirm-Chain '待审核子女创建预约返回 HTTP 404 且业务事实未变化' ($pendingReservationFacts -eq $pendingReservationAfterFacts) `
+        'A denied pending-child reservation changed reservations, work orders, notifications, or relationship/archive facts.'
+
+    $frozenFacts = Get-IsolatedBusinessFacts
+    $frozenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/3' -BearerToken $frozenChildAccount.Token
+    $frozenAfterFacts = Get-IsolatedBusinessFacts
+    $frozenJson = $null
+    try { $frozenJson = ConvertFrom-Json -InputObject $frozenResponse.Content } catch { }
+    Confirm-Chain '冻结亲情访问返回 HTTP 403 KINSHIP_NOT_ACTIVE' `
+        ($frozenResponse.StatusCode -eq 403 -and $null -ne $frozenJson -and $frozenJson.code -eq 'KINSHIP_NOT_ACTIVE') `
+        'A frozen family relationship did not receive HTTP 403 KINSHIP_NOT_ACTIVE.'
+    Confirm-Chain '冻结亲情拒绝没有业务数据副作用' ($frozenFacts -eq $frozenAfterFacts) `
+        'A denied frozen-child read changed isolated business facts.'
+
+    $unboundFacts = Get-IsolatedBusinessFacts
+    $unboundResponse = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/2' -BearerToken $childAccount.Token
+    $unboundAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '有效子女读取同社区未绑定老人返回 HTTP 404' ($unboundResponse.StatusCode -eq 404) `
+        'An active child was able to read a same-community elder without a family link.'
+    Confirm-Chain '同社区未绑定老人拒绝没有业务数据副作用' ($unboundFacts -eq $unboundAfterFacts) `
+        'A denied unbound-elder read changed isolated business facts.'
+
+    $communityFacts = Get-IsolatedBusinessFacts
+    $adminCrossRead = Invoke-Api -Method 'GET' -Path "/api/v1/elder/archives/$crossCommunityElderId"
+    $workerCrossRead = Invoke-Api -Method 'GET' -Path "/api/v1/elder/archives/$crossCommunityElderId" -BearerToken $workerAccount.Token
+    $communityAfterReads = Get-IsolatedBusinessFacts
+    Confirm-Chain '社区管理员和网格员读取另一社区老人均返回 HTTP 404' `
+        ($adminCrossRead.StatusCode -eq 404 -and $workerCrossRead.StatusCode -eq 404 -and $communityFacts -eq $communityAfterReads) `
+        'A community-1 staff session could read community-2 elder data or caused a business side effect.'
+
+    $crossWriteFacts = Get-IsolatedBusinessFacts
+    $crossTargetBefore = Invoke-AppDatabaseQuery "SELECT CONCAT(status, ':', row_version) FROM elder_profile WHERE elder_id = $crossCommunityElderId;"
+    $crossStatusResponse = Invoke-Api -Method 'POST' -Path "/api/v1/elder/archives/$crossCommunityElderId/status" -CsrfToken $adminAccount.Csrf -Body @{
+        status = 'INACTIVE'
+        reason = '隔离跨社区越权负例'
+    }
+    $crossTargetAfter = Invoke-AppDatabaseQuery "SELECT CONCAT(status, ':', row_version) FROM elder_profile WHERE elder_id = $crossCommunityElderId;"
+    $crossWriteAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '跨社区管理员写入返回 HTTP 404 且数据库业务事实未变化' `
+        ($crossStatusResponse.StatusCode -eq 404 -and $crossTargetBefore.ExitCode -eq 0 -and
+            $crossTargetAfter.ExitCode -eq 0 -and $crossTargetBefore.StdOut.Trim() -eq $crossTargetAfter.StdOut.Trim() -and
+            $crossWriteFacts -eq $crossWriteAfterFacts) `
+        'A cross-community status mutation was not rejected without changing its target or business facts.'
+
+    $adminLocalRead = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1'
+    $workerLocalRead = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1' -BearerToken $workerAccount.Token
+    $adminLocalJson = $null
+    $workerLocalJson = $null
+    try { $adminLocalJson = ConvertFrom-Json -InputObject $adminLocalRead.Content } catch { }
+    try { $workerLocalJson = ConvertFrom-Json -InputObject $workerLocalRead.Content } catch { }
+    Confirm-Chain '同社区管理员和网格员仍可读取本社区老人档案' `
+        ($adminLocalRead.StatusCode -eq 200 -and $workerLocalRead.StatusCode -eq 200 -and
+            [string]$adminLocalJson.data.elderId -eq '1' -and [string]$workerLocalJson.data.elderId -eq '1') `
+        'A same-community staff positive read failed after cross-community denial checks.'
+
+    $pendingSessionCurrent = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingChildAccount.Token
+    Confirm-Chain '待审核子女未过期会话可通过当前用户接口' ($pendingSessionCurrent.StatusCode -eq 200) `
+        'The pending-child test session was not valid before setting its absolute expiry in the isolated DB.'
+    $expirePendingSession = Invoke-AppDatabaseQuery "UPDATE auth_session SET absolute_expires_at = '2000-01-01 00:00:00.000' WHERE user_id = 5 AND revoked_at IS NULL; SELECT ROW_COUNT();"
+    Confirm-That ($expirePendingSession.ExitCode -eq 0 -and $expirePendingSession.StdOut.Trim() -eq '1') `
+        'Could not set exactly one pending-child test session to an expired absolute deadline.'
+    $expiredSessionFacts = Get-IsolatedBusinessFacts
+    $expiredSessionResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingChildAccount.Token
+    $expiredSessionAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '过期绝对期限会话访问返回 HTTP 401' ($expiredSessionResponse.StatusCode -eq 401) `
+        'An absolute-expired authentication session was not rejected with HTTP 401.'
+    Confirm-Chain '过期会话拒绝没有业务数据副作用' ($expiredSessionFacts -eq $expiredSessionAfterFacts) `
+        'An expired-session request changed isolated business facts.'
+
+    $pendingReloginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Body @{
+        phone = $pendingChildAccount.Phone
+        password = $pendingChildAccount.Password
+        clientType = 'MINIAPP'
+    }
+    $pendingReloginJson = Assert-OkApiResponse $pendingReloginResponse 'Pending child role-revocation test login'
+    $pendingRoleToken = [string]$pendingReloginJson.data.token
+    $revokePendingRole = Invoke-AppDatabaseQuery "UPDATE sys_user_role SET status = 'REVOKED', revoked_at = NOW(3), revoked_by = 1, revoke_reason = 'SYSHTTP_TEST' WHERE user_id = 5 AND role_code = 'CHILD' AND status = 'ACTIVE'; SELECT ROW_COUNT();"
+    Confirm-That ($revokePendingRole.ExitCode -eq 0 -and $revokePendingRole.StdOut.Trim() -eq '1') `
+        'Could not revoke exactly one pending-child test role assignment in the isolated DB.'
+    $revokedRoleFacts = Get-IsolatedBusinessFacts
+    $revokedRoleResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingRoleToken
+    $revokedRoleAfterFacts = Get-IsolatedBusinessFacts
+    Confirm-Chain '撤销当前角色分配后旧会话返回 HTTP 401' ($revokedRoleResponse.StatusCode -eq 401) `
+        'An authentication session with no currently active role assignment was not rejected with HTTP 401.'
+    Confirm-Chain '撤销角色会话拒绝没有业务数据副作用' ($revokedRoleFacts -eq $revokedRoleAfterFacts) `
+        'A revoked-role session request changed isolated business facts.'
+    $restorePendingRole = Invoke-AppDatabaseQuery @'
+UPDATE auth_session SET revoked_at = COALESCE(revoked_at, NOW(3)), revoke_reason = COALESCE(revoke_reason, 'ROLE_CHANGED')
+WHERE user_id = 5;
+UPDATE sys_user_role
+   SET status = 'ACTIVE', revoked_at = NULL, revoked_by = NULL, revoke_reason = NULL
+ WHERE user_id = 5 AND role_code = 'CHILD';
+SELECT CONCAT(
+    (SELECT COUNT(*) FROM sys_user_role WHERE user_id = 5 AND role_code = 'CHILD' AND status = 'ACTIVE'),
+    ':',
+    (SELECT COUNT(*) FROM auth_session WHERE user_id = 5 AND revoked_at IS NULL)
+);
+'@
+    Confirm-That ($restorePendingRole.ExitCode -eq 0 -and $restorePendingRole.StdOut.Trim() -eq '1:0') `
+        'Could not restore the seed role while ensuring all role-matrix test sessions remained revoked.'
 
     $elderProfileResponse = Invoke-Api -Method 'GET' -Path '/api/v1/elder/profile/me' -BearerToken $elderAccount.Token
     $elderProfileJson = Assert-OkApiResponse $elderProfileResponse 'Elder self-profile request'
@@ -963,6 +1891,23 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
         $script:scriptExitCode = 1
         if (-not $script:failureMessage) { $script:failureMessage = 'Cleanup could not stop an isolated service safely.' }
     }
+    try {
+        if (Remove-SyntheticDatabaseFixtures) {
+            $script:fixtureCleanupMessage = 'Task 4 新增员工、家庭身份、社区 2 和工单夹具已从临时库删除。'
+            $script:checks['Task 4 新增员工/家庭/工单夹具在清理前移除'] = '通过'
+            Write-Output '通过：Task 4 新增员工/家庭/工单夹具在清理前移除'
+        } else {
+            $script:fixtureCleanupMessage = 'Task 4 合成夹具未能在删除 tempRoot 前完成数据库删除。'
+            $script:checks['Task 4 新增员工/家庭/工单夹具在清理前移除'] = '失败'
+            $script:scriptExitCode = 1
+            if (-not $script:failureMessage) { $script:failureMessage = 'Task 4 synthetic fixture cleanup failed.' }
+        }
+    } catch {
+        $script:fixtureCleanupMessage = 'Task 4 合成夹具清理检查失败；请检查本次隔离数据库。'
+        $script:checks['Task 4 新增员工/家庭/工单夹具在清理前移除'] = '失败'
+        $script:scriptExitCode = 1
+        if (-not $script:failureMessage) { $script:failureMessage = 'Task 4 synthetic fixture cleanup failed.' }
+    }
     if ($script:apiProcess) {
         try {
             $script:apiProcess.Refresh()
@@ -999,7 +1944,7 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
     foreach ($key in $script:envKeys) {
         [Environment]::SetEnvironmentVariable($key, $script:previousValues[$key], 'Process')
     }
-    if ($script:httpClient) { $script:httpClient.Dispose() }
+    foreach ($httpClient in $script:extraHttpClients) { $httpClient.Dispose() }
 
     try {
         $resolvedDataDirectory = [IO.Path]::GetFullPath($dataDirectory)

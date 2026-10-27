@@ -31,8 +31,8 @@ $dbHost = $values['DB_HOST']
 if ([string]::IsNullOrWhiteSpace($dbHost) -or $dbHost.Trim().ToLowerInvariant() -notin @('localhost', '127.0.0.1', '::1')) {
     throw '安全保护：DB_HOST 必须指向本机。'
 }
-if ($values['DB_NAME'] -ne 'elderly_care_demo') { throw '安全保护：仅允许修复隔离演示库 elderly_care_demo。' }
-if ($values['DB_USERNAME'] -ne 'elderly_app') { throw '安全保护：仅允许使用 elderly_app 演示账号。' }
+if ($values['DB_NAME'] -cne 'elderly_care_demo') { throw '安全保护：仅允许修复隔离演示库 elderly_care_demo。' }
+if ($values['DB_USERNAME'] -cne 'elderly_app') { throw '安全保护：仅允许使用 elderly_app 演示账号。' }
 if ([string]::IsNullOrWhiteSpace($values['DB_PASSWORD'])) { throw '请在 .env.local 中配置 DB_PASSWORD。' }
 $dbPort = if ($values['DB_PORT']) { $values['DB_PORT'] } else { '3306' }
 

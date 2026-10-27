@@ -3,7 +3,11 @@ package cn.communityelderly.modules.order.controller;
 import cn.communityelderly.common.api.ErrorCode;
 import cn.communityelderly.common.api.Result;
 import cn.communityelderly.common.exception.BusinessException;
+import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.RequireRoles;
+import cn.communityelderly.common.security.UserContext;
+import cn.communityelderly.modules.order.service.WorkOrderService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.http.HttpHeaders;
@@ -28,9 +32,16 @@ public class FileUploadController {
     private static final Set<String> ALLOWED_EXTENSIONS = Set.of("jpg", "jpeg", "png", "webp");
     private static final long MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
     private final Path storageDirectory;
+    private final WorkOrderService workOrderService;
 
-    public FileUploadController() {
-        this.storageDirectory = Paths.get(".local-data", "files", "photos").toAbsolutePath().normalize();
+    @Autowired
+    public FileUploadController(WorkOrderService workOrderService) {
+        this(workOrderService, System.getenv("APP_STORAGE_ROOT"));
+    }
+
+    public FileUploadController(WorkOrderService workOrderService, String appStorageRoot) {
+        this.workOrderService = workOrderService;
+        this.storageDirectory = resolveStorageDirectory(appStorageRoot);
         try {
             Files.createDirectories(this.storageDirectory);
         } catch (IOException e) {
@@ -38,9 +49,25 @@ public class FileUploadController {
         }
     }
 
+    private static Path resolveStorageDirectory(String appStorageRoot) {
+        if (StringUtils.hasText(appStorageRoot)) {
+            return Paths.get(appStorageRoot).toAbsolutePath().normalize();
+        }
+        return Paths.get(".local-data", "files", "photos").toAbsolutePath().normalize();
+    }
+
     @PostMapping("/upload")
-    @RequireRoles({"GRID_WORKER", "COMMUNITY_ADMIN"})
-    public Result<Map<String, String>> uploadPhoto(@RequestParam("file") MultipartFile file) {
+    @RequireRoles({"GRID_WORKER", "CARE_WORKER", "COMMUNITY_ADMIN"})
+    public Result<Map<String, String>> uploadPhoto(@RequestParam("file") MultipartFile file,
+                                                    @RequestParam(value = "workOrderId", required = false) Long workOrderId) {
+        CurrentUser current = UserContext.requireCurrentUser();
+        if ("CARE_WORKER".equalsIgnoreCase(current.getCurrentRole())) {
+            if (workOrderId == null) {
+                throw new BusinessException(ErrorCode.VALIDATION_FAILED, "护工上传现场照片必须关联本人承接的工单");
+            }
+            workOrderService.assertCurrentCareWorkerMayUpload(workOrderId);
+        }
+
         if (file.isEmpty()) {
             throw new BusinessException(ErrorCode.VALIDATION_FAILED, "上传的文件不能为空");
         }

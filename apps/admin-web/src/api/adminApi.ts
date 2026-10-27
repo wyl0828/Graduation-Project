@@ -8,10 +8,30 @@ export interface AdminLoginResponse {
 }
 
 export interface AdminCurrentUser {
-  userId: number
+  userId: string
   phone: string
   communityId: string | number | null
   currentRole: string
+}
+
+export type StaffRoleCode = 'COMMUNITY_ADMIN' | 'GRID_WORKER' | 'CARE_WORKER'
+
+export interface StaffSummary {
+  userId: number
+  maskedPhone: string
+  accountStatus: string
+  roleCodes: StaffRoleCode[]
+}
+
+export interface StaffCreateRequest {
+  phone: string
+  initialPassword: string
+  roles: StaffRoleCode[]
+}
+
+export interface StaffRolesUpdateRequest {
+  roles: StaffRoleCode[]
+  reason: string
 }
 
 export interface CreateElderRequest {
@@ -87,6 +107,17 @@ export const adminApi = {
   },
   logout() {
     return http.post('/auth/logout')
+  },
+
+  // M01 社区工作人员账号与角色管理
+  getStaffList() {
+    return http.get<StaffSummary[]>('/admin/staff')
+  },
+  createStaff(data: StaffCreateRequest) {
+    return http.post<StaffSummary>('/admin/staff', data, { 'Idempotency-Key': crypto.randomUUID() })
+  },
+  replaceStaffRoles(userId: number, data: StaffRolesUpdateRequest) {
+    return http.put<StaffSummary>(`/admin/staff/${userId}/roles`, data, { 'Idempotency-Key': crypto.randomUUID() })
   },
 
   // M02 老人档案 (P-03 / P-04)
@@ -210,9 +241,10 @@ export const adminApi = {
   },
 
   // 文件上传 (工单履约凭据照片)
-  uploadPhotoEvidence(file: File) {
+  uploadPhotoEvidence(file: File, workOrderId?: number) {
     const formData = new FormData()
     formData.append('file', file)
+    if (workOrderId !== undefined) formData.append('workOrderId', String(workOrderId))
     return http.request<{ url: string; fileName: string; size: number }>('/files/upload', {
       method: 'POST',
       body: formData,
