@@ -10,6 +10,7 @@ import cn.communityelderly.modules.auth.mapper.UserAccountMapper;
 import cn.communityelderly.modules.auth.mapper.UserRoleMapper;
 import cn.communityelderly.modules.auth.service.impl.AuthRateLimitService;
 import cn.communityelderly.modules.auth.service.impl.AuthServiceImpl;
+import cn.communityelderly.modules.auth.service.impl.AuthSessionAuthenticationService;
 import cn.communityelderly.modules.auth.service.impl.PhoneVerificationChallengeService;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -100,6 +103,31 @@ class AuthSessionLifetimeTest {
         assertNull(session.getValue().getCsrfTokenHash());
         assertNull(response.getCsrfToken());
         assertNotNull(response.getToken());
+    }
+
+    @Test
+    @DisplayName("Web 会话空闲达到 30 分钟后被拒绝且不刷新会话")
+    void webSessionIsRejectedAfterThirtyMinutesIdleWithoutTouchingSession() {
+        AuthSessionMapper sessions = mock(AuthSessionMapper.class);
+        UserAccountMapper accounts = mock(UserAccountMapper.class);
+        UserRoleMapper roles = mock(UserRoleMapper.class);
+        AuthSessionAuthenticationService authenticationService = new AuthSessionAuthenticationService(
+                sessions, accounts, roles);
+        LocalDateTime now = LocalDateTime.now(ZoneId.of("Asia/Shanghai"));
+
+        AuthSession idleSession = new AuthSession();
+        idleSession.setSessionId("idle-web-session");
+        idleSession.setUserId(42L);
+        idleSession.setClientType("WEB");
+        idleSession.setActiveAssignmentId(700L);
+        idleSession.setCreatedAt(now.minusHours(1));
+        idleSession.setLastActivityAt(now.minusMinutes(30));
+        idleSession.setAbsoluteExpiresAt(now.plusHours(1));
+        when(sessions.selectOne(any(Wrapper.class))).thenReturn(idleSession);
+
+        assertNull(authenticationService.authenticate("idle-web-token", "/api/v1/auth/current-user"));
+
+        verify(sessions, never()).updateById(any(AuthSession.class));
     }
 
     private LoginRequest loginRequest(String clientType) {

@@ -324,18 +324,39 @@ class ObjectAuthorizationServiceTest {
     @DisplayName("FROZEN 亲情关系明确拒绝，保留冻结状态的 403 契约")
     void frozenKinshipIsRejected() {
         ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
+        ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderFamilyLink frozen = new ElderFamilyLink();
         frozen.setElderId(2L);
         frozen.setChildUserId(44L);
         frozen.setStatus("FROZEN");
         when(familyMapper.selectOne(any(Wrapper.class))).thenReturn(frozen);
-        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(mock(ElderProfileMapper.class),
+        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), familyMapper);
         UserContext.set(new CurrentUser("44", "13800000044", "FAMILY", List.of("CHILD"), "CHILD", "1"));
 
         BusinessException error = assertThrows(BusinessException.class, () -> policy.requireActiveChildLink(2L));
 
         assertEquals(ErrorCode.KINSHIP_NOT_ACTIVE, error.getErrorCode());
+    }
+
+    @Test
+    @DisplayName("UNLINKED 亲情关系按不可访问资源返回 404，且不读取老人档案")
+    void unlinkedKinshipIsHiddenAsInaccessible() {
+        ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
+        ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
+        ElderFamilyLink unlinked = new ElderFamilyLink();
+        unlinked.setElderId(2L);
+        unlinked.setChildUserId(44L);
+        unlinked.setStatus("UNLINKED");
+        when(familyMapper.selectOne(any(Wrapper.class))).thenReturn(unlinked);
+        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
+                mock(ElderIdentityLinkMapper.class), familyMapper);
+        UserContext.set(new CurrentUser("44", "13800000044", "FAMILY", List.of("CHILD"), "CHILD", "1"));
+
+        BusinessException error = assertThrows(BusinessException.class, () -> policy.requireActiveChildLink(2L));
+
+        assertEquals(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE, error.getErrorCode());
+        verify(elderMapper, never()).selectById(anyLong());
     }
 
     @Test

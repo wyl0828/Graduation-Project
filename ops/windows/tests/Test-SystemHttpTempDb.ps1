@@ -59,7 +59,12 @@ $script:checks = [ordered]@{
     '冻结亲情访问返回 HTTP 403 KINSHIP_NOT_ACTIVE' = '未执行'
     '有效子女读取同社区未绑定老人返回 HTTP 404' = '未执行'
     '过期绝对期限会话访问返回 HTTP 401' = '未执行'
+    '空闲超过会话上限的旧 Bearer 返回 HTTP 401 且会话事实不变' = '未执行'
     '撤销当前角色分配后旧会话返回 HTTP 401' = '未执行'
+    '重新授予角色后旧 Web Cookie 与 MINIAPP Bearer 仍返回 HTTP 401' = '未执行'
+    'UNLINKED 亲情访问返回 HTTP 404 且业务/会话/通知/审计不变' = '未执行'
+    '改密后旧 Web Cookie 与 Bearer 返回 HTTP 401 且撤销原因/时间可查询' = '未执行'
+    'DISABLED 账号的旧 Web Cookie 与 Bearer 返回 HTTP 401 且无请求副作用' = '未执行'
     '社区管理员和网格员读取另一社区老人均返回 HTTP 404' = '未执行'
     '跨社区管理员写入返回 HTTP 404 且数据库业务事实未变化' = '未执行'
     '同社区管理员和网格员仍可读取本社区老人档案' = '未执行'
@@ -291,6 +296,39 @@ SELECT CONCAT_WS('|',
 FROM auth_session WHERE user_id = $UserId;
 "@
     if ($result.ExitCode -ne 0) { throw 'Could not read the isolated target-session snapshot.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-SessionDetailsForUser([long]$UserId) {
+    $result = Invoke-AppDatabaseQuery @"
+SELECT COALESCE(GROUP_CONCAT(CONCAT_WS('~', session_id, client_type,
+    COALESCE(DATE_FORMAT(last_activity_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL'),
+    COALESCE(DATE_FORMAT(revoked_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL'),
+    COALESCE(revoke_reason, 'NULL')) ORDER BY session_id SEPARATOR ','), '')
+FROM auth_session WHERE user_id = $UserId;
+"@
+    if ($result.ExitCode -ne 0) { throw 'Could not read detailed isolated session facts.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-SessionStateForToken([long]$UserId, [string]$Token) {
+    $escapedToken = $Token.Replace("'", "''")
+    $result = Invoke-AppDatabaseQuery @"
+SELECT CONCAT_WS('|', session_id, client_type,
+    COALESCE(DATE_FORMAT(last_activity_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL'),
+    COALESCE(DATE_FORMAT(revoked_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL'),
+    COALESCE(revoke_reason, 'NULL'))
+FROM auth_session
+WHERE user_id = $UserId AND token_hash = UNHEX(SHA2('$escapedToken', 256))
+LIMIT 1;
+"@
+    if ($result.ExitCode -ne 0 -or -not $result.StdOut.Trim()) { throw 'Could not read isolated session state for a token.' }
+    return [string]$result.StdOut.Trim()
+}
+
+function Get-NotificationAndAuditFacts {
+    $result = Invoke-AppDatabaseQuery "SELECT CONCAT_WS('|', (SELECT COUNT(*) FROM notification_event), (SELECT COUNT(*) FROM notification_delivery), (SELECT COUNT(*) FROM audit_log));"
+    if ($result.ExitCode -ne 0) { throw 'Could not read isolated notification and audit facts.' }
     return [string]$result.StdOut.Trim()
 }
 
@@ -738,10 +776,15 @@ function Write-RunReport([int]$ExitCode) {
     $lines.Add('- 覆盖员工 API 创建/角色替换、授权拒绝与无副作用快照、审计字段、API 角色变更后的 Web Cookie/MINIAPP 令牌撤销及重授后持续失效；覆盖预置 FAMILY CHILD+ELDER 切换后的独立关系/身份范围，以及 CARE_WORKER 当前承接工单执行和 workOrderId 绑定上传拒绝边界。')
     $lines.Add('- 保留原有六账号登录、Web Cookie/CSRF、老人资料/服药打卡、子女绑定老人/预约、管理员确认并派单、网格员履约照片提交、管理员审核至预约 COMPLETED，以及老人 SOS 触发/管理员处置控制链；完整 `mvn test` 与 HTTP 链分别报告。')
     $lines.Add('- 护工和家庭账号均为临时合成夹具；家庭 elder_identity_link 的激活票据仅为外键测试直接预置，未调用短信、注册、激活或设备 API。CARE_WORKER 上传前后统计 `APP_STORAGE_ROOT` 文件数，存储目录位于本次唯一 tempRoot 内。')
-    $lines.Add('- Maven 测试前脚本会清空进程内所有 AUTH_TEST_* 变量，故 AuthDatabaseIntegrationTest 按环境条件跳过，不会覆盖同一演示 seed 账号；其跳过计入 JUnit 汇总。')
+    $lines.Add('- Maven 测试前脚本会清空进程内所有 AUTH_TEST_* 变量，故 AuthDatabaseIntegrationTest 的 4 个认证门控用例按环境条件跳过；它们由 Test-AuthSessionTempDb.ps1 在独立临时库实际证明，跳过仍计入本次 JUnit 汇总。')
+    $lines.Add('- 批次 1 认证矩阵额外核验 DISABLED、改密后旧 Cookie/Bearer、空闲超时、UNLINKED 和角色撤销后重新授予；断言拒绝状态及会话撤销、业务、通知、审计事实。')
     $lines.Add('- 图片链使用合成 1x1 PNG 验证上传接口、文件读取与履约 URL 引用，不验证真实相机图片、前端预览/裁剪或完整 H5/管理端 UI；也未覆盖真实短信/验证码、所有业务角色/全部接口和并发/压力场景。')
     $lines.Add('- `-HoldSeconds` 在完整业务 HTTP 链通过后、停止 API/MySQL 前保留隔离 API 与 MySQL，默认 0，最大 300 秒；JUnit 已在此前 API 停止窗口完成。')
     $lines.Add('')
+    $reportDirectory = Split-Path -Parent $reportPath
+    if (-not (Test-Path -LiteralPath $reportDirectory)) {
+        New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+    }
     Set-Content -LiteralPath $reportPath -Value $lines -Encoding UTF8
 }
 
@@ -1217,6 +1260,7 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
     $staffWebCurrentBefore = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
     $staffMiniCurrentBefore = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
     $targetSessionsBefore = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    $targetSessionDetailsBefore = Get-SessionDetailsForUser -UserId $staffTargetUserId
     Confirm-Chain '合成员工 Web Cookie 与 MINIAPP Bearer 会话均可独立认证' `
         ($staffWebCookies.Count -eq 1 -and $null -eq $staffWebLoginJson.data.token -and $staffMiniToken.Length -gt 0 -and
             $staffWebCurrentBefore.StatusCode -eq 200 -and $staffMiniCurrentBefore.StatusCode -eq 200 -and
@@ -1228,11 +1272,19 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
         -Body @{ roles = @('GRID_WORKER'); reason = '隔离旧 token 撤销验收' }
     $null = Assert-OkApiResponse $revokeSessionsResponse 'Synthetic staff role removal and session revocation'
     $targetSessionsRevoked = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    $targetSessionDetailsRevoked = Get-SessionDetailsForUser -UserId $staffTargetUserId
+    $roleRevokedSessionDetails = @($targetSessionDetailsRevoked -split ',')
+    $allRoleRevocationsHaveReasonAndTime = $roleRevokedSessionDetails.Count -eq 2 -and
+        @($roleRevokedSessionDetails | Where-Object {
+            $parts = $_ -split '~', 5
+            $parts.Count -ne 5 -or $parts[3] -eq 'NULL' -or $parts[4] -ne 'ROLE_CHANGED'
+        }).Count -eq 0
     $staffWebOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
     $staffMiniOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
     Confirm-Chain 'API 角色变更撤销目标全部 Web/MINIAPP 会话并标记 ROLE_CHANGED' `
         ($targetSessionsRevoked.Count -eq 4 -and $targetSessionsRevoked[0] -eq '2' -and
-            $targetSessionsRevoked[1] -eq '0' -and $targetSessionsRevoked[2] -eq '2') `
+            $targetSessionsRevoked[1] -eq '0' -and $targetSessionsRevoked[2] -eq '2' -and
+            $allRoleRevocationsHaveReasonAndTime) `
         'The API-driven role change did not revoke every target session with ROLE_CHANGED.'
     Confirm-Chain 'API 角色变更后旧 Web Cookie 与 MINIAPP Bearer 均返回 HTTP 401' `
         ($staffWebOldTokenResponse.StatusCode -eq 401 -and $staffMiniOldTokenResponse.StatusCode -eq 401) `
@@ -1255,12 +1307,15 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
         -Body @{ roles = @('COMMUNITY_ADMIN', 'CARE_WORKER'); reason = '隔离角色重新授予验收' }
     $null = Assert-OkApiResponse $staffRegrantResponse 'Synthetic staff role regrant'
     $targetSessionsAfterRegrant = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
+    $targetSessionDetailsAfterRegrant = Get-SessionDetailsForUser -UserId $staffTargetUserId
     $staffWebOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
     $staffMiniOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
     Confirm-Chain '重新授予角色后旧 Web Cookie 与 MINIAPP Bearer 仍返回 HTTP 401' `
         ($staffWebOldAfterRegrant.StatusCode -eq 401 -and $staffMiniOldAfterRegrant.StatusCode -eq 401 -and
             $targetSessionsAfterRegrant.Count -eq 4 -and $targetSessionsAfterRegrant[1] -eq '0' -and
-            $targetSessionsAfterRegrant[2] -eq '2') `
+            $targetSessionsAfterRegrant[2] -eq '2' -and
+            $targetSessionDetailsAfterRegrant -eq $targetSessionDetailsRevoked -and
+            $targetSessionDetailsAfterRegrant -ne $targetSessionDetailsBefore) `
         'Regranting roles revived an old target token or reactivated a revoked server-side session.'
 
     $familyPhone = New-SyntheticPhone
@@ -1627,16 +1682,46 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
     $pendingSessionCurrent = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingChildAccount.Token
     Confirm-Chain '待审核子女未过期会话可通过当前用户接口' ($pendingSessionCurrent.StatusCode -eq 200) `
         'The pending-child test session was not valid before setting its absolute expiry in the isolated DB.'
-    $expirePendingSession = Invoke-AppDatabaseQuery "UPDATE auth_session SET absolute_expires_at = '2000-01-01 00:00:00.000' WHERE user_id = 5 AND revoked_at IS NULL; SELECT ROW_COUNT();"
+    $pendingIdleSession = Get-SessionStateForToken -UserId 5 -Token $pendingChildAccount.Token
+    $pendingIdleSessionId = ($pendingIdleSession -split '\|', 5)[0]
+    $expirePendingIdle = Invoke-AppDatabaseQuery "UPDATE auth_session SET last_activity_at = DATE_SUB(NOW(3), INTERVAL 8 DAY) WHERE session_id = '$pendingIdleSessionId' AND revoked_at IS NULL; SELECT ROW_COUNT();"
+    Confirm-That ($expirePendingIdle.ExitCode -eq 0 -and $expirePendingIdle.StdOut.Trim() -eq '1') `
+        'Could not set exactly one MINIAPP test session beyond its seven-day idle limit.'
+    $idleSessionFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $idleSessionStateBefore = Get-SessionStateForToken -UserId 5 -Token $pendingChildAccount.Token
+    $idleSessionResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingChildAccount.Token
+    $idleSessionFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $idleSessionStateAfter = Get-SessionStateForToken -UserId 5 -Token $pendingChildAccount.Token
+    Confirm-Chain '空闲超过会话上限的旧 Bearer 返回 HTTP 401 且会话事实不变' `
+        ($idleSessionResponse.StatusCode -eq 401 -and $idleSessionFactsBefore -eq $idleSessionFactsAfter -and
+            $idleSessionStateBefore -eq $idleSessionStateAfter) `
+        'An idle-expired MINIAPP session was accepted or the rejected request changed session, audit, notification, or business facts.'
+
+    $pendingAbsoluteLogin = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Body @{
+        phone = $pendingChildAccount.Phone
+        password = $pendingChildAccount.Password
+        clientType = 'MINIAPP'
+    }
+    $pendingAbsoluteJson = Assert-OkApiResponse $pendingAbsoluteLogin 'Pending child absolute-expiry test login'
+    $pendingAbsoluteToken = [string]$pendingAbsoluteJson.data.token
+    $pendingAbsoluteCurrent = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingAbsoluteToken
+    Confirm-Chain '待审核子女新会话在绝对过期前可认证' ($pendingAbsoluteCurrent.StatusCode -eq 200) `
+        'The pending-child absolute-expiry test session was not valid before setting its deadline.'
+    $pendingAbsoluteSession = Get-SessionStateForToken -UserId 5 -Token $pendingAbsoluteToken
+    $pendingAbsoluteSessionId = ($pendingAbsoluteSession -split '\|', 5)[0]
+    $expirePendingSession = Invoke-AppDatabaseQuery "UPDATE auth_session SET absolute_expires_at = '2000-01-01 00:00:00.000' WHERE session_id = '$pendingAbsoluteSessionId' AND revoked_at IS NULL; SELECT ROW_COUNT();"
     Confirm-That ($expirePendingSession.ExitCode -eq 0 -and $expirePendingSession.StdOut.Trim() -eq '1') `
         'Could not set exactly one pending-child test session to an expired absolute deadline.'
-    $expiredSessionFacts = Get-IsolatedBusinessFacts
-    $expiredSessionResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingChildAccount.Token
-    $expiredSessionAfterFacts = Get-IsolatedBusinessFacts
+    $expiredSessionFacts = Get-IsolatedTestSideEffectSnapshot
+    $expiredSessionStateBefore = Get-SessionStateForToken -UserId 5 -Token $pendingAbsoluteToken
+    $expiredSessionResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $pendingAbsoluteToken
+    $expiredSessionAfterFacts = Get-IsolatedTestSideEffectSnapshot
+    $expiredSessionStateAfter = Get-SessionStateForToken -UserId 5 -Token $pendingAbsoluteToken
     Confirm-Chain '过期绝对期限会话访问返回 HTTP 401' ($expiredSessionResponse.StatusCode -eq 401) `
         'An absolute-expired authentication session was not rejected with HTTP 401.'
-    Confirm-Chain '过期会话拒绝没有业务数据副作用' ($expiredSessionFacts -eq $expiredSessionAfterFacts) `
-        'An expired-session request changed isolated business facts.'
+    Confirm-Chain '过期会话拒绝没有业务/会话/通知/审计副作用' `
+        ($expiredSessionFacts -eq $expiredSessionAfterFacts -and $expiredSessionStateBefore -eq $expiredSessionStateAfter) `
+        'An absolute-expired session request changed isolated business, session, notification, or audit facts.'
 
     $pendingReloginResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Body @{
         phone = $pendingChildAccount.Phone
@@ -1853,6 +1938,93 @@ SELECT CONCAT(
             [string]$sosOrderReadJson.data.status -eq 'CLOSED' -and [string]$sosOrderReadJson.data.sourceType -eq 'SOS') `
         'POST /api/v1/emergency/sos/{id}/dispatch or /close did not leave both the SOS and generated work order closed.'
 
+    $closureWebContext = New-TestHttpClient
+    $closureMiniContext = New-TestHttpClient
+    $closureWebLogin = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $closureWebContext.Client -Body @{
+        phone = $staffPhone; password = $staffPassword; clientType = 'WEB'
+    }
+    $closureWebLoginJson = Assert-OkApiResponse $closureWebLogin 'Task 2 password-change Web login'
+    $closureMiniLogin = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $closureMiniContext.Client -Body @{
+        phone = $staffPhone; password = $staffPassword; clientType = 'MINIAPP'
+    }
+    $closureMiniLoginJson = Assert-OkApiResponse $closureMiniLogin 'Task 2 password-change MINIAPP login'
+    $closureMiniToken = [string]$closureMiniLoginJson.data.token
+    $closureWebCookies = @($closureWebContext.Cookies.GetCookies([Uri]($script:apiBase + '/api/v1/auth/login')) |
+        Where-Object { $_.Name -eq 'SESSION_TOKEN' })
+    Confirm-That ($closureWebCookies.Count -eq 1 -and $closureWebCookies[0].Value) `
+        'Could not capture the isolated staff Web session cookie before password change.'
+    $closureOldCookieValue = [string]$closureWebCookies[0].Value
+    $closureWebSessionBefore = Get-SessionStateForToken -UserId $staffTargetUserId -Token $closureOldCookieValue
+    $closureMiniSessionBefore = Get-SessionStateForToken -UserId $staffTargetUserId -Token $closureMiniToken
+    $newStaffPassword = 'isolated-reset-' + [Guid]::NewGuid().ToString('N')
+    $passwordChangeResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/change-password' `
+        -Client $closureWebContext.Client -CsrfToken $closureWebLoginJson.data.csrfToken -Body @{
+            currentPassword = $staffPassword; newPassword = $newStaffPassword
+        }
+    $null = Assert-OkApiResponse $passwordChangeResponse 'Task 2 staff password change'
+    $closureWebSessionAfter = Get-SessionStateForToken -UserId $staffTargetUserId -Token $closureOldCookieValue
+    $closureMiniSessionAfter = Get-SessionStateForToken -UserId $staffTargetUserId -Token $closureMiniToken
+    $webSessionAfterParts = $closureWebSessionAfter -split '\|', 5
+    $miniSessionAfterParts = $closureMiniSessionAfter -split '\|', 5
+    $passwordRevocationFactsOk = $webSessionAfterParts.Count -eq 5 -and $miniSessionAfterParts.Count -eq 5 -and
+        $webSessionAfterParts[3] -ne 'NULL' -and $webSessionAfterParts[4] -eq 'PASSWORD_RESET' -and
+        $miniSessionAfterParts[3] -ne 'NULL' -and $miniSessionAfterParts[4] -eq 'PASSWORD_RESET'
+    $passwordDeniedCookieContext = New-TestHttpClient
+    $passwordDeniedCookieContext.Cookies.Add([Uri]$script:apiBase,
+        [Net.Cookie]::new('SESSION_TOKEN', $closureOldCookieValue, '/api/v1'))
+    $passwordDeniedFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $passwordDeniedAuditFactsBefore = Get-NotificationAndAuditFacts
+    $passwordOldCookieResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $passwordDeniedCookieContext.Client
+    $passwordOldBearerResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' `
+        -BearerToken $closureMiniToken -Client $closureMiniContext.Client
+    $passwordDeniedFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $passwordDeniedAuditFactsAfter = Get-NotificationAndAuditFacts
+    Confirm-Chain '改密后旧 Web Cookie 与 Bearer 返回 HTTP 401 且撤销原因/时间可查询' `
+        ($passwordOldCookieResponse.StatusCode -eq 401 -and $passwordOldBearerResponse.StatusCode -eq 401 -and
+            $passwordRevocationFactsOk -and $passwordDeniedFactsBefore -eq $passwordDeniedFactsAfter -and
+            $passwordDeniedAuditFactsBefore -eq $passwordDeniedAuditFactsAfter) `
+        'A password change left an old Cookie/Bearer usable, failed to persist PASSWORD_RESET with revoked_at, or a denied request changed isolated facts.'
+
+    $disabledWebContext = New-TestHttpClient
+    $disabledMiniContext = New-TestHttpClient
+    $disabledWebLogin = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $disabledWebContext.Client -Body @{
+        phone = $staffPhone; password = $newStaffPassword; clientType = 'WEB'
+    }
+    $null = Assert-OkApiResponse $disabledWebLogin 'Task 2 disabled-account Web login'
+    $disabledMiniLogin = Invoke-Api -Method 'POST' -Path '/api/v1/auth/login' -Client $disabledMiniContext.Client -Body @{
+        phone = $staffPhone; password = $newStaffPassword; clientType = 'MINIAPP'
+    }
+    $disabledMiniLoginJson = Assert-OkApiResponse $disabledMiniLogin 'Task 2 disabled-account MINIAPP login'
+    $disabledMiniToken = [string]$disabledMiniLoginJson.data.token
+    $disabledWebCookies = @($disabledWebContext.Cookies.GetCookies([Uri]($script:apiBase + '/api/v1/auth/login')) |
+        Where-Object { $_.Name -eq 'SESSION_TOKEN' })
+    Confirm-That ($disabledWebCookies.Count -eq 1 -and $disabledWebCookies[0].Value) `
+        'Could not capture the isolated staff Web session cookie before disabling the account.'
+    $disabledOldCookieValue = [string]$disabledWebCookies[0].Value
+    $disabledWebSessionBefore = Get-SessionStateForToken -UserId $staffTargetUserId -Token $disabledOldCookieValue
+    $disabledMiniSessionBefore = Get-SessionStateForToken -UserId $staffTargetUserId -Token $disabledMiniToken
+    $disableAccount = Invoke-AppDatabaseQuery "UPDATE sys_user SET status = 'DISABLED', disabled_at = NOW(3), disabled_reason = '隔离账号停用验收' WHERE user_id = $staffTargetUserId AND status = 'ACTIVE'; SELECT ROW_COUNT();"
+    Confirm-That ($disableAccount.ExitCode -eq 0 -and $disableAccount.StdOut.Trim() -eq '1') `
+        'Could not mark exactly one synthetic staff account DISABLED in the isolated database.'
+    $disabledFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $disabledAuditFactsBefore = Get-NotificationAndAuditFacts
+    $disabledCookieProbe = New-TestHttpClient
+    $disabledCookieProbe.Cookies.Add([Uri]$script:apiBase,
+        [Net.Cookie]::new('SESSION_TOKEN', $disabledOldCookieValue, '/api/v1'))
+    $disabledCookieResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $disabledCookieProbe.Client
+    $disabledBearerResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' `
+        -BearerToken $disabledMiniToken -Client $disabledMiniContext.Client
+    $disabledFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $disabledAuditFactsAfter = Get-NotificationAndAuditFacts
+    $disabledWebSessionAfter = Get-SessionStateForToken -UserId $staffTargetUserId -Token $disabledOldCookieValue
+    $disabledMiniSessionAfter = Get-SessionStateForToken -UserId $staffTargetUserId -Token $disabledMiniToken
+    Confirm-Chain 'DISABLED 账号的旧 Web Cookie 与 Bearer 返回 HTTP 401 且无请求副作用' `
+        ($disabledCookieResponse.StatusCode -eq 401 -and $disabledBearerResponse.StatusCode -eq 401 -and
+            $disabledWebSessionBefore -eq $disabledWebSessionAfter -and
+            $disabledMiniSessionBefore -eq $disabledMiniSessionAfter -and
+            $disabledFactsBefore -eq $disabledFactsAfter -and $disabledAuditFactsBefore -eq $disabledAuditFactsAfter) `
+        'A disabled account session was accepted or the denied request changed session, business, notification, or audit facts.'
+
     # Keep logout checks after all elder/child business assertions so their
     # tokens remain available for the complete isolated business flow above.
     $elderLogoutResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/logout' -BearerToken $elderAccount.Token
@@ -1862,6 +2034,36 @@ SELECT CONCAT(
     $elderOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $elderAccount.Token
     Confirm-Chain '老人注销后的旧 Bearer Token 请求返回 HTTP 401' ($elderOldTokenResponse.StatusCode -eq 401) `
         'The elder Bearer Token remained valid after logout.'
+
+    $childUserLookup = Invoke-AppDatabaseQuery "SELECT user_id FROM auth_session WHERE token_hash = UNHEX(SHA2('$($childAccount.Token)', 256)) AND revoked_at IS NULL LIMIT 1;"
+    $childUserId = 0L
+    $childUserIdParsed = $childUserLookup.ExitCode -eq 0 -and [long]::TryParse($childUserLookup.StdOut.Trim(), [ref]$childUserId)
+    Confirm-That ($childUserIdParsed -and $childUserId -gt 0) 'Could not resolve the active synthetic child user for the UNLINKED check.'
+    $childLinkLookup = Invoke-AppDatabaseQuery "SELECT link_id FROM elder_family_link WHERE elder_id = 1 AND child_user_id = $childUserId AND status = 'ACTIVE';"
+    $childLinkId = 0L
+    $childLinkIdParsed = $childLinkLookup.ExitCode -eq 0 -and [long]::TryParse($childLinkLookup.StdOut.Trim(), [ref]$childLinkId)
+    Confirm-That ($childLinkIdParsed -and $childLinkId -gt 0) 'Could not resolve exactly one active synthetic child-to-elder relationship.'
+    $unlinkFixture = Invoke-AppDatabaseQuery "UPDATE elder_family_link SET status = 'UNLINKED', row_version = row_version + 1 WHERE link_id = $childLinkId AND status = 'ACTIVE'; SELECT ROW_COUNT();"
+    Confirm-That ($unlinkFixture.ExitCode -eq 0 -and $unlinkFixture.StdOut.Trim() -eq '1') `
+        'Could not mark exactly one synthetic child-to-elder relationship UNLINKED.'
+    $unlinkedFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $unlinkedAuditFactsBefore = Get-NotificationAndAuditFacts
+    $unlinkedSessionBefore = Get-SessionStateForToken -UserId $childUserId -Token $childAccount.Token
+    $unlinkedElderRead = Invoke-Api -Method 'GET' -Path '/api/v1/elder/archives/1' -BearerToken $childAccount.Token
+    $unlinkedFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $unlinkedAuditFactsAfter = Get-NotificationAndAuditFacts
+    $unlinkedSessionAfter = Get-SessionStateForToken -UserId $childUserId -Token $childAccount.Token
+    $unlinkedSessionBeforeParts = $unlinkedSessionBefore -split '\|', 5
+    $unlinkedSessionAfterParts = $unlinkedSessionAfter -split '\|', 5
+    $unlinkedRevocationStateUnchanged = $unlinkedSessionBeforeParts.Count -eq 5 -and
+        $unlinkedSessionAfterParts.Count -eq 5 -and
+        $unlinkedSessionBeforeParts[0] -eq $unlinkedSessionAfterParts[0] -and
+        $unlinkedSessionBeforeParts[3] -eq $unlinkedSessionAfterParts[3] -and
+        $unlinkedSessionBeforeParts[4] -eq $unlinkedSessionAfterParts[4]
+    Confirm-Chain 'UNLINKED 亲情访问返回 HTTP 404 且业务/会话/通知/审计不变' `
+        ($unlinkedElderRead.StatusCode -eq 404 -and $unlinkedFactsBefore -eq $unlinkedFactsAfter -and
+            $unlinkedAuditFactsBefore -eq $unlinkedAuditFactsAfter -and $unlinkedRevocationStateUnchanged) `
+        'An UNLINKED family relationship remained readable or the denied request changed isolated facts.'
 
     $childLogoutResponse = Invoke-Api -Method 'POST' -Path '/api/v1/auth/logout' -BearerToken $childAccount.Token
     $null = Assert-OkApiResponse $childLogoutResponse 'Child logout'
