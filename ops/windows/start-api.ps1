@@ -21,10 +21,19 @@ foreach ($line in Get-Content -LiteralPath $envLocal) {
     $values[$key] = $value
 }
 
-$dbHost = if ($values.ContainsKey('DB_HOST')) { $values['DB_HOST'] } else { '127.0.0.1' }
-$dbName = if ($values.ContainsKey('DB_NAME')) { $values['DB_NAME'] } else { 'elderly_care_demo' }
+$requiredDbKeys = @('DB_HOST', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD')
+foreach ($key in $requiredDbKeys) {
+    if (-not $values.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$values[$key])) {
+        throw "请在 .env.local 中配置 $key。"
+    }
+}
+
+$dbHost = $values['DB_HOST']
+$dbName = $values['DB_NAME']
+$dbUsername = $values['DB_USERNAME']
 if ($dbHost -notin @('localhost', '127.0.0.1', '::1')) { throw '仅允许连接本机 MySQL；DB_HOST 必须是 localhost、127.0.0.1 或 ::1。' }
-if ($dbName -ne 'elderly_care_demo') { throw '仅允许连接隔离演示库 elderly_care_demo。' }
+if ($dbName -cne 'elderly_care_demo') { throw '仅允许连接隔离演示库 elderly_care_demo。' }
+if ($dbUsername -cne 'elderly_app') { throw '仅允许使用 elderly_app 演示账号。' }
 
 $previousValues = @{}
 foreach ($key in $allowedKeys) { $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }

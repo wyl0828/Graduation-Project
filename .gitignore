@@ -2,6 +2,19 @@
 .env
 .env.*
 !.env.example
+**/project.private.config.json
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.key
+id_rsa*
+id_ed25519*
+
+# Local tool and mini-program configuration
+.codex/
+apps/elder-family/src/manifest.json
 
 # Local runtime data and uploaded files
 .local-data/

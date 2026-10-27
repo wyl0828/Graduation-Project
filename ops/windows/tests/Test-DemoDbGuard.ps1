@@ -86,7 +86,7 @@ try {
     New-Item -ItemType Directory -Path $tempRoot | Out-Null
     $sandbox = Join-Path $tempRoot 'repo'
     New-Item -ItemType Directory -Path $sandbox | Out-Null
-    foreach ($relativePath in @('ops\windows\run-test.ps1', 'ops\windows\load-demo-seed.ps1', 'ops\windows\verify-db-v3.ps1', 'database\seed\demo_synthetic_seed_m01_m02.sql', 'database\seed\demo_synthetic_seed_m03_m12.sql', 'services\api\src\main\resources\application-local.yml', 'services\api\src\main\resources\db\migration\V1__bootstrap_empty_schema.sql', 'services\api\src\main\resources\db\migration\V2__m01_m02_identity_and_archive.sql', 'services\api\src\main\resources\db\migration\V3__core_business_schema.sql')) {
+    foreach ($relativePath in @('ops\windows\start-api.ps1', 'ops\windows\run-test.ps1', 'ops\windows\repair-demo-passwords.ps1', 'ops\windows\repair-demo-activation.ps1', 'ops\windows\load-demo-seed.ps1', 'ops\windows\verify-db-v3.ps1', 'database\seed\demo_synthetic_seed_m01_m02.sql', 'database\seed\demo_synthetic_seed_m03_m12.sql', 'services\api\src\main\resources\application-local.yml', 'services\api\src\main\resources\db\migration\V1__bootstrap_empty_schema.sql', 'services\api\src\main\resources\db\migration\V2__m01_m02_identity_and_archive.sql', 'services\api\src\main\resources\db\migration\V3__core_business_schema.sql')) {
         $source = Join-Path $repoRoot $relativePath
         $destination = Join-Path $sandbox $relativePath
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
@@ -94,23 +94,114 @@ try {
     }
 
     $mvnMarker = Join-Path $tempRoot 'maven-invoked.txt'
+    $guardFailures = [System.Collections.Generic.List[string]]::new()
     @('@echo off', 'echo invoked>>"%FAKE_MVN_MARKER%"', 'exit /b %FAKE_MVN_EXIT_CODE%') | Set-Content -LiteralPath (Join-Path $sandbox 'mvnw.cmd') -Encoding ASCII
     $env:FAKE_MVN_MARKER = $mvnMarker
     $env:FAKE_MVN_EXIT_CODE = '0'
 
+    function Set-SandboxDbConfig([string[]]$Lines) {
+        Set-Content -LiteralPath (Join-Path $sandbox '.env.local') -Value $Lines -Encoding ASCII
+    }
+
+    function Assert-MavenGuardRejects([string]$ScriptRelativePath, [string[]]$ConfigLines, [string]$Description) {
+        Remove-Item -LiteralPath $mvnMarker -Force -ErrorAction SilentlyContinue
+        Set-SandboxDbConfig $ConfigLines
+        $result = Invoke-ChildPowerShell (Join-Path $sandbox $ScriptRelativePath) $sandbox
+        if ($result.ExitCode -eq 0) { $guardFailures.Add("$ScriptRelativePath accepted $Description.") }
+        if (Test-Path -LiteralPath $mvnMarker) { $guardFailures.Add("$ScriptRelativePath invoked Maven before rejecting $Description.") }
+    }
+
+    $validDbConfig = @('DB_HOST=127.0.0.1', 'DB_NAME=elderly_care_demo', 'DB_USERNAME=elderly_app', 'DB_PASSWORD=synthetic-test-only')
+
+    # Positive control: prove the fake Maven command is reachable with valid sandbox config.
+    Remove-Item -LiteralPath $mvnMarker -Force -ErrorAction SilentlyContinue
+    Set-SandboxDbConfig $validDbConfig
+    $startApiPositive = Invoke-ChildPowerShell (Join-Path $sandbox 'ops\windows\start-api.ps1') $sandbox
+    Assert-That ($startApiPositive.ExitCode -eq 0) "start-api valid sandbox config returned $($startApiPositive.ExitCode)."
+    Assert-That (Test-Path -LiteralPath $mvnMarker) 'start-api positive control did not invoke the fake Maven command.'
+
+    foreach ($requiredKey in @('DB_HOST', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD')) {
+        $withoutKey = @($validDbConfig | Where-Object { $_ -notmatch "^$requiredKey=" })
+        Assert-MavenGuardRejects 'ops\windows\start-api.ps1' $withoutKey "missing $requiredKey"
+        $blankKey = @($validDbConfig | Where-Object { $_ -notmatch "^$requiredKey=" }) + "$requiredKey="
+        Assert-MavenGuardRejects 'ops\windows\start-api.ps1' $blankKey "blank $requiredKey"
+    }
+
+    $wrongStartApiTargets = @(
+        @{ Key = 'DB_HOST'; Value = '198.51.100.17'; Description = 'a non-loopback DB_HOST' },
+        @{ Key = 'DB_NAME'; Value = 'ELDERLY_CARE_DEMO'; Description = 'a case-mismatched DB_NAME' },
+        @{ Key = 'DB_USERNAME'; Value = 'ELDERLY_APP'; Description = 'a case-mismatched DB_USERNAME' }
+    )
+    foreach ($target in $wrongStartApiTargets) {
+        $wrongConfig = @($validDbConfig | Where-Object { $_ -notmatch "^$($target.Key)=" }) + "$($target.Key)=$($target.Value)"
+        Assert-MavenGuardRejects 'ops\windows\start-api.ps1' $wrongConfig $target.Description
+    }
+
+    foreach ($target in $wrongStartApiTargets) {
+        $wrongConfig = @($validDbConfig | Where-Object { $_ -notmatch "^$($target.Key)=" }) + "$($target.Key)=$($target.Value)"
+        Assert-MavenGuardRejects 'ops\windows\run-test.ps1' $wrongConfig $target.Description
+    }
+
+    # The password-repair scripts must reject missing/blank DB coordinates and unsafe targets before
+    # resolving or invoking mysql. Their config is always the sandbox .env.local created here.
+    $repairMysqlShim = Join-Path $tempRoot 'repair-mysql-shim'
+    New-Item -ItemType Directory -Path $repairMysqlShim | Out-Null
+    $repairMysqlMarker = Join-Path $tempRoot 'repair-mysql-invoked.txt'
+    @('@echo off', 'echo invoked>>"%FAKE_MYSQL_MARKER%"', 'exit /b 0') | Set-Content -LiteralPath (Join-Path $repairMysqlShim 'mysql.cmd') -Encoding ASCII
+    $env:FAKE_MYSQL_MARKER = $repairMysqlMarker
+    $previousRepairPath = $env:PATH
+    $env:PATH = "$repairMysqlShim;$previousRepairPath"
+    try {
+        # Positive controls: the fake MySQL command must resolve and run for a valid target.
+        # Its marker-only response contains no rows, so the scripts stop before any write.
+        foreach ($repairScript in @('ops\windows\repair-demo-passwords.ps1', 'ops\windows\repair-demo-activation.ps1')) {
+            Remove-Item -LiteralPath $repairMysqlMarker -Force -ErrorAction SilentlyContinue
+            Set-SandboxDbConfig $validDbConfig
+            $positiveResult = Invoke-ChildPowerShell (Join-Path $sandbox $repairScript) $sandbox
+            Assert-That (Test-Path -LiteralPath $repairMysqlMarker) "$repairScript positive control did not invoke the fake MySQL command."
+        }
+
+        function Assert-RepairGuardRejects([string]$ScriptRelativePath, [string[]]$ConfigLines, [string]$Description) {
+            Remove-Item -LiteralPath $repairMysqlMarker -Force -ErrorAction SilentlyContinue
+            Set-SandboxDbConfig $ConfigLines
+            $result = Invoke-ChildPowerShell (Join-Path $sandbox $ScriptRelativePath) $sandbox
+            if ($result.ExitCode -eq 0) { $guardFailures.Add("$ScriptRelativePath accepted $Description.") }
+            if (Test-Path -LiteralPath $repairMysqlMarker) { $guardFailures.Add("$ScriptRelativePath invoked mysql before rejecting $Description.") }
+        }
+
+        foreach ($repairScript in @('ops\windows\repair-demo-passwords.ps1', 'ops\windows\repair-demo-activation.ps1')) {
+            foreach ($requiredKey in @('DB_HOST', 'DB_NAME', 'DB_USERNAME', 'DB_PASSWORD')) {
+                $withoutKey = @($validDbConfig | Where-Object { $_ -notmatch "^$requiredKey=" })
+                Assert-RepairGuardRejects $repairScript $withoutKey "missing $requiredKey"
+                $blankKey = @($validDbConfig | Where-Object { $_ -notmatch "^$requiredKey=" }) + "$requiredKey="
+                Assert-RepairGuardRejects $repairScript $blankKey "blank $requiredKey"
+            }
+            foreach ($target in $wrongStartApiTargets) {
+                $wrongConfig = @($validDbConfig | Where-Object { $_ -notmatch "^$($target.Key)=" }) + "$($target.Key)=$($target.Value)"
+                Assert-RepairGuardRejects $repairScript $wrongConfig $target.Description
+            }
+        }
+    }
+    finally { $env:PATH = $previousRepairPath }
+
     # This case must fail before Maven starts when the application password is absent.
-    @('DB_HOST=127.0.0.1', 'DB_NAME=elderly_care_demo', 'DB_USERNAME=elderly_app') |
-        Set-Content -LiteralPath (Join-Path $sandbox '.env.local') -Encoding ASCII
+    Remove-Item -LiteralPath $mvnMarker -Force -ErrorAction SilentlyContinue
+    Set-SandboxDbConfig @('DB_HOST=127.0.0.1', 'DB_NAME=elderly_care_demo', 'DB_USERNAME=elderly_app')
     $missingPassword = Invoke-ChildPowerShell (Join-Path $sandbox 'ops\windows\run-test.ps1') $sandbox
     Assert-That ($missingPassword.ExitCode -ne 0) 'run-test accepted missing DB_PASSWORD.'
     Assert-That (-not (Test-Path -LiteralPath $mvnMarker)) 'run-test launched Maven before rejecting missing DB_PASSWORD.'
 
     # This case must preserve Maven's failing exit code for calling scripts and CI.
-    @('DB_HOST=localhost', 'DB_NAME=elderly_care_demo', 'DB_USERNAME=elderly_app', 'DB_PASSWORD=synthetic-test-only') |
-        Set-Content -LiteralPath (Join-Path $sandbox '.env.local') -Encoding ASCII
+    Set-SandboxDbConfig @('DB_HOST=localhost', 'DB_NAME=elderly_care_demo', 'DB_USERNAME=elderly_app', 'DB_PASSWORD=synthetic-test-only')
     $env:FAKE_MVN_EXIT_CODE = '23'
     $mavenFailure = Invoke-ChildPowerShell (Join-Path $sandbox 'ops\windows\run-test.ps1') $sandbox
     Assert-That ($mavenFailure.ExitCode -eq 23) "run-test returned $($mavenFailure.ExitCode) after Maven returned 23."
+
+    if ($guardFailures.Count -gt 0) { throw "Expected entrypoint guard failures:`n - $($guardFailures -join "`n - ")" }
+
+    Write-Output 'PASS: start-api rejected missing/blank DB config and unsafe targets before Maven'
+    Write-Output 'PASS: run-test rejected unsafe DB targets before Maven'
+    Write-Output 'PASS: repair scripts rejected missing/blank/unsafe targets before mysql'
 
     Assert-That (Test-Path -LiteralPath $mysqlServerExe) 'A local MySQL server binary is required for the isolated SQL guard test.'
     $dataDirectory = Join-Path $tempRoot 'mysql-data'
