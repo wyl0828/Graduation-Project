@@ -332,6 +332,12 @@ function Get-NotificationAndAuditFacts {
     return [string]$result.StdOut.Trim()
 }
 
+function Get-AuthorizationSideEffectSnapshot([long]$UserId) {
+    return (Get-IsolatedTestSideEffectSnapshot) + '||' +
+        (Get-SessionDetailsForUser -UserId $UserId) + '||' +
+        (Get-NotificationAndAuditFacts)
+}
+
 function Get-StaffAuditFacts([long]$UserId, [string]$Action) {
     $result = Invoke-AppDatabaseQuery @"
 SELECT CONCAT_WS('|', actor_user_id, actor_role, COALESCE(community_id, 'NULL'), target_type, target_id, action, result,
@@ -1279,16 +1285,21 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
             $parts = $_ -split '~', 5
             $parts.Count -ne 5 -or $parts[3] -eq 'NULL' -or $parts[4] -ne 'ROLE_CHANGED'
         }).Count -eq 0
+    $roleRevokedFactsBeforeWebRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     $staffWebOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
+    $roleRevokedFactsAfterWebRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     $staffMiniOldTokenResponse = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
+    $roleRevokedFactsAfterMiniRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     Confirm-Chain 'API 角色变更撤销目标全部 Web/MINIAPP 会话并标记 ROLE_CHANGED' `
         ($targetSessionsRevoked.Count -eq 4 -and $targetSessionsRevoked[0] -eq '2' -and
             $targetSessionsRevoked[1] -eq '0' -and $targetSessionsRevoked[2] -eq '2' -and
             $allRoleRevocationsHaveReasonAndTime) `
         'The API-driven role change did not revoke every target session with ROLE_CHANGED.'
     Confirm-Chain 'API 角色变更后旧 Web Cookie 与 MINIAPP Bearer 均返回 HTTP 401' `
-        ($staffWebOldTokenResponse.StatusCode -eq 401 -and $staffMiniOldTokenResponse.StatusCode -eq 401) `
-        'A staff Web Cookie or MINIAPP Bearer Token remained valid after the API-driven role change.'
+        ($staffWebOldTokenResponse.StatusCode -eq 401 -and $staffMiniOldTokenResponse.StatusCode -eq 401 -and
+            $roleRevokedFactsBeforeWebRequest -eq $roleRevokedFactsAfterWebRequest -and
+            $roleRevokedFactsAfterWebRequest -eq $roleRevokedFactsAfterMiniRequest) `
+        'A staff Web Cookie or MINIAPP Bearer Token remained valid after role revocation, or a denied request changed business, session, notification, or audit facts.'
 
     $revokeAuditLine = Get-StaffAuditFacts -UserId $staffTargetUserId -Action 'STAFF_ROLES_REPLACED'
     $revokeAuditParts = $revokeAuditLine -split '\|', 8
@@ -1308,15 +1319,20 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
     $null = Assert-OkApiResponse $staffRegrantResponse 'Synthetic staff role regrant'
     $targetSessionsAfterRegrant = (Get-SessionFactsForUser -UserId $staffTargetUserId) -split '\|', 4
     $targetSessionDetailsAfterRegrant = Get-SessionDetailsForUser -UserId $staffTargetUserId
+    $regrantDeniedFactsBeforeWebRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     $staffWebOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -Client $staffWebContext.Client
+    $regrantDeniedFactsAfterWebRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     $staffMiniOldAfterRegrant = Invoke-Api -Method 'GET' -Path '/api/v1/auth/current-user' -BearerToken $staffMiniToken -Client $staffMiniContext.Client
+    $regrantDeniedFactsAfterMiniRequest = Get-AuthorizationSideEffectSnapshot -UserId $staffTargetUserId
     Confirm-Chain '重新授予角色后旧 Web Cookie 与 MINIAPP Bearer 仍返回 HTTP 401' `
         ($staffWebOldAfterRegrant.StatusCode -eq 401 -and $staffMiniOldAfterRegrant.StatusCode -eq 401 -and
             $targetSessionsAfterRegrant.Count -eq 4 -and $targetSessionsAfterRegrant[1] -eq '0' -and
             $targetSessionsAfterRegrant[2] -eq '2' -and
             $targetSessionDetailsAfterRegrant -eq $targetSessionDetailsRevoked -and
-            $targetSessionDetailsAfterRegrant -ne $targetSessionDetailsBefore) `
-        'Regranting roles revived an old target token or reactivated a revoked server-side session.'
+            $targetSessionDetailsAfterRegrant -ne $targetSessionDetailsBefore -and
+            $regrantDeniedFactsBeforeWebRequest -eq $regrantDeniedFactsAfterWebRequest -and
+            $regrantDeniedFactsAfterWebRequest -eq $regrantDeniedFactsAfterMiniRequest) `
+        'Regranting roles revived an old target token, reactivated a revoked session, or a denied request changed business, session, notification, or audit facts.'
 
     $familyPhone = New-SyntheticPhone
     $script:syntheticFamilyPhone = $familyPhone
