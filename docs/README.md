@@ -5,7 +5,7 @@
 | [`current/`](./current/README.md) | 当前需求、设计、架构和实施计划；固定文件名，不累积旧版本状态 | [现行索引](./current/README.md) |
 | [`decisions/`](./decisions/README.md) | 按日期保存业务范围、权限和关键规则的决策过程 | [决策索引](./decisions/README.md) |
 | [`validation/`](./validation/README.md) | 带环境与日期的实际执行、审查和验收证据 | [验证索引](./validation/README.md) |
-| [`archive/`](./archive/README.md) | 被替代的全文版本、候选稿和整理前快照 | [归档索引](./archive/README.md) |
+| [`archive/`](./archive/README.md) | 被替代的全文版本、候选稿、历史验证材料和已完成专项计划 | [归档索引](./archive/README.md) |
 | `superpowers/specs/` | 已批准的专项设计与功能范围约束 | [社区管理员工账号与角色管理设计](./superpowers/specs/2026-10-26-社区管理员工账号与角色管理设计.md) |
 | [`superpowers/plans/`](./superpowers/plans/README.md) | 实施步骤与任务状态；完成结论以验证记录为准 | [计划索引](./superpowers/plans/README.md) |
 
