@@ -48,6 +48,7 @@ $script:previousValues = @{}
 $script:checks = [ordered]@{
     '临时 MySQL 使用随机 loopback 端口且目标库名校验一致' = '未执行'
     'Spring Boot 首次启动由 Flyway 初始化隔离库并通过健康检查' = '未执行'
+    'API 重启后同键预约重放原 HTTP 状态码与 JSON 正文' = '未执行'
     'Flyway 后使用随机 marker 校验目标库身份并删除 marker' = '未执行'
     '首轮 API 已退出，且确认其端口已释放后才加载 seed' = '未执行'
     '现有 first-load seed wrapper 在临时库返回退出码 0' = '未执行'
@@ -651,6 +652,43 @@ function Assert-OkApiResponse([object]$Response, [string]$Description, [int]$Exp
     return $json
 }
 
+function Add-RedactedJsonDiff([object]$First, [object]$Second, [string]$Path, [Collections.Generic.List[string]]$Diffs) {
+    if ($First -is [Collections.IDictionary] -and $Second -is [Collections.IDictionary]) {
+        $keys = @(@($First.Keys) + @($Second.Keys) | Sort-Object -Unique)
+        foreach ($key in $keys) {
+            if (-not $First.Contains($key)) { $Diffs.Add("$Path.$key:missing-first"); continue }
+            if (-not $Second.Contains($key)) { $Diffs.Add("$Path.$key:missing-replay"); continue }
+            Add-RedactedJsonDiff -First $First[$key] -Second $Second[$key] -Path "$Path.$key" -Diffs $Diffs
+        }
+        return
+    }
+    if (($First -is [Array] -or $First -is [Collections.IList]) -and ($Second -is [Array] -or $Second -is [Collections.IList])) {
+        if ($First.Count -ne $Second.Count) { $Diffs.Add("$Path:array-count") }
+        for ($index = 0; $index -lt [Math]::Min($First.Count, $Second.Count); $index++) {
+            Add-RedactedJsonDiff -First $First[$index] -Second $Second[$index] -Path "$Path[$index]" -Diffs $Diffs
+        }
+        return
+    }
+    $firstType = if ($null -eq $First) { 'null' } elseif ($First -is [string]) { 'string' } elseif ($First -is [bool]) { 'boolean' } elseif ($First -is [ValueType]) { 'number' } else { 'object' }
+    $secondType = if ($null -eq $Second) { 'null' } elseif ($Second -is [string]) { 'string' } elseif ($Second -is [bool]) { 'boolean' } elseif ($Second -is [ValueType]) { 'number' } else { 'object' }
+    if ($firstType -ne $secondType -or $First -cne $Second) {
+        $Diffs.Add("${Path}:$firstType/$secondType")
+    }
+}
+
+function Get-RedactedJsonDiff([string]$FirstJson, [string]$SecondJson) {
+    try {
+        $firstObject = ConvertFrom-Json -InputObject $FirstJson -AsHashtable
+        $secondObject = ConvertFrom-Json -InputObject $SecondJson -AsHashtable
+        $diffs = [Collections.Generic.List[string]]::new()
+        Add-RedactedJsonDiff -First $firstObject -Second $secondObject -Path '$' -Diffs $diffs
+        if ($diffs.Count -eq 0) { return 'none' }
+        return ($diffs -join ',')
+    } catch {
+        return 'invalid-json'
+    }
+}
+
 function Get-MavenTestSummary([object[]]$OutputLines, [DateTime]$StartedAt) {
     $total = 0
     $failures = 0
@@ -784,7 +822,7 @@ function Write-RunReport([int]$ExitCode) {
     $lines.Add('- 护工和家庭账号均为临时合成夹具；家庭 elder_identity_link 的激活票据仅为外键测试直接预置，未调用短信、注册、激活或设备 API。CARE_WORKER 上传前后统计 `APP_STORAGE_ROOT` 文件数，存储目录位于本次唯一 tempRoot 内。')
     $lines.Add('- Maven 测试前脚本会清空进程内所有 AUTH_TEST_* 变量，故 AuthDatabaseIntegrationTest 的 4 个认证门控用例按环境条件跳过；它们由 Test-AuthSessionTempDb.ps1 在独立临时库实际证明，跳过仍计入本次 JUnit 汇总。')
     $lines.Add('- 批次 1 认证矩阵额外核验 DISABLED、改密后旧 Cookie/Bearer、空闲超时、UNLINKED 和角色撤销后重新授予；断言拒绝状态及会话撤销、业务、通知、审计事实。')
-    $lines.Add('- 图片链使用合成 1x1 PNG 验证上传接口、文件读取与履约 URL 引用，不验证真实相机图片、前端预览/裁剪或完整 H5/管理端 UI；也未覆盖真实短信/验证码、所有业务角色/全部接口和并发/压力场景。')
+    $lines.Add('- 图片链使用合成 1x1 PNG 验证上传接口、文件读取与履约 URL 引用，不验证真实相机图片、前端预览/裁剪或完整 H5/管理端 UI；本入口不覆盖真实短信/验证码、全部角色/接口或压力负载；同键并发处理中冲突由 IdempotencyIntegrationTest 覆盖。')
     $lines.Add('- `-HoldSeconds` 在完整业务 HTTP 链通过后、停止 API/MySQL 前保留隔离 API 与 MySQL，默认 0，最大 300 秒；JUnit 已在此前 API 停止窗口完成。')
     $lines.Add('')
     $reportDirectory = Split-Path -Parent $reportPath
@@ -874,7 +912,7 @@ FLUSH PRIVILEGES;
 
     $script:apiProcess = Start-TestApi 'flyway'
     $null = Wait-ApiReady -Process $script:apiProcess -PhaseName 'Flyway initialization'
-    $flywayCount = Invoke-Mysql @('-h127.0.0.1', "-P$($script:dbPort)", '-uelderly_app', '--database=elderly_care_demo', '-N', '-B', '-e', "SELECT COUNT(DISTINCT version) FROM flyway_schema_history WHERE success=1 AND version IN ('1','2','3','3.1','3.2','3.3');")
+    $flywayCount = Invoke-Mysql @('-h127.0.0.1', "-P$($script:dbPort)", '-uelderly_app', '--database=elderly_care_demo', '-N', '-B', '-e', "SELECT COUNT(DISTINCT version) FROM flyway_schema_history WHERE success=1 AND version IN ('1','2','3','3.1','3.2','3.3','3.4');")
     $markerSetup = Invoke-Mysql @('-h127.0.0.1', "-P$($script:dbPort)", '-uelderly_app', '--database=elderly_care_demo') @"
 CREATE TABLE system_http_test_marker (marker_value CHAR(32) NOT NULL PRIMARY KEY);
 INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
@@ -883,7 +921,7 @@ INSERT INTO system_http_test_marker (marker_value) VALUES ('$marker');
     $expectedMarkedIdentity = "$($script:dbPort)`telderly_care_demo`t$marker"
     $markerDrop = Invoke-Mysql @('-h127.0.0.1', "-P$($script:dbPort)", '-uelderly_app', '--database=elderly_care_demo', '-e', 'DROP TABLE system_http_test_marker;')
     Confirm-Chain 'Spring Boot 首次启动由 Flyway 初始化隔离库并通过健康检查' `
-        ($flywayCount.ExitCode -eq 0 -and $flywayCount.StdOut.Trim() -eq '6' -and
+        ($flywayCount.ExitCode -eq 0 -and $flywayCount.StdOut.Trim() -eq '7' -and
             (Test-ApiBoundToLoopback $script:httpPort)) `
         'Flyway/API readiness check failed.'
     Confirm-Chain 'Flyway 后使用随机 marker 校验目标库身份并删除 marker' `
@@ -1510,7 +1548,8 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         'A care worker accessed another worker order or its denied upload wrote isolated state/file data.'
 
     $reassignResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careReassignedOrderId/dispatch" `
-        -CsrfToken $adminAccount.Csrf -Body @{ assigneeUserId = $workerAccount.UserId; reason = '隔离 HTTP 护工工单改派验收' }
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-CARE-REASSIGN-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ assigneeUserId = $workerAccount.UserId; reason = '隔离 HTTP 护工工单改派验收' }
     $null = Assert-OkApiResponse $reassignResponse 'Administrator reassignment from care worker to grid worker'
     $reassignedAssignee = Invoke-AppDatabaseQuery "SELECT current_assignee_id FROM work_order WHERE work_order_id = $careReassignedOrderId;"
     $reassignedCareDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careReassignedOrderId" `
@@ -1565,7 +1604,8 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         'The current care worker did not read the assigned order or its response contained unrelated elder fields.'
 
     $careAcceptResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/accept" `
-        -BearerToken $careToken -Client $careHttpContext.Client
+        -BearerToken $careToken -IdempotencyKey ('SYSHTTP-CARE-ACCEPT-' + [Guid]::NewGuid().ToString('N')) `
+        -Client $careHttpContext.Client
     $null = Assert-OkApiResponse $careAcceptResponse 'CARE_WORKER accept assigned work order'
     $careAcceptedDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
         -BearerToken $careToken -Client $careHttpContext.Client
@@ -1574,7 +1614,8 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         'The assigned care order did not transition to ACCEPTED.'
 
     $careStartResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/start" `
-        -BearerToken $careToken -Client $careHttpContext.Client
+        -BearerToken $careToken -IdempotencyKey ('SYSHTTP-CARE-START-' + [Guid]::NewGuid().ToString('N')) `
+        -Client $careHttpContext.Client
     $null = Assert-OkApiResponse $careStartResponse 'CARE_WORKER start assigned work order'
     $careProcessingDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
         -BearerToken $careToken -Client $careHttpContext.Client
@@ -1596,7 +1637,8 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         'A valid order-bound care-worker upload did not create exactly one readable file under isolated storage.'
 
     $careExecutionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/execution" `
-        -BearerToken $careToken -Client $careHttpContext.Client -Body @{
+        -BearerToken $careToken -IdempotencyKey ('SYSHTTP-CARE-EXECUTION-' + [Guid]::NewGuid().ToString('N')) `
+        -Client $careHttpContext.Client -Body @{
             resultSummary = '隔离护工 HTTP 验收已完成。'; photoUrls = @($carePhotoUrl); isExemptPhoto = $false
         }
     $null = Assert-OkApiResponse $careExecutionResponse 'CARE_WORKER execution submission'
@@ -1629,7 +1671,8 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
 
     $pendingReservationFacts = Get-IsolatedBusinessFacts
     $pendingReservationDate = ([TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time'))).AddDays(60).ToString('yyyy-MM-dd')
-    $pendingReservationResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' -BearerToken $pendingChildAccount.Token -Body @{
+    $pendingReservationResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $pendingChildAccount.Token -IdempotencyKey ('SYSHTTP-PENDING-RESERVATION-' + [Guid]::NewGuid().ToString('N')) -Body @{
         elderId = 1
         serviceType = 'DAILY_CARE'
         serviceDate = $pendingReservationDate
@@ -1786,15 +1829,55 @@ SELECT CONCAT(
     Confirm-Chain '今日药盒存在可打卡任务' ($actionableMedicationTasks.Count -gt 0) `
         "GET /api/v1/medication/tasks/today/1 returned no task with status PENDING or OVER_WINDOW_UNCONFIRMED; observed statuses: $medicationStatuses."
     $medicationTask = $actionableMedicationTasks[0]
-    $medicationCheckinResponse = Invoke-Api -Method 'POST' -Path '/api/v1/medication/tasks/checkin' -BearerToken $elderAccount.Token -Body @{
+    $medicationIdempotencyKey = 'SYSHTTP-MEDICATION-' + [Guid]::NewGuid().ToString('N')
+    $medicationCheckinBody = @{
         taskId = [long]$medicationTask.taskId
         checkinMode = 'SELF_CONFIRMED'
-        idempotencyKey = 'SYSHTTP-' + [Guid]::NewGuid().ToString('N')
     }
+    $medicationCheckinResponse = Invoke-Api -Method 'POST' -Path '/api/v1/medication/tasks/checkin' `
+        -BearerToken $elderAccount.Token -IdempotencyKey $medicationIdempotencyKey -Body $medicationCheckinBody
     $medicationCheckinJson = Assert-OkApiResponse $medicationCheckinResponse 'Elder medication task check-in'
+    $medicationIdempotencyBeforeReplay = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(record_state, '|', response_status, '|', LEFT(SHA2(response_body, 256), 12), '|',
+              TIMESTAMPDIFF(SECOND, NOW(3), expires_at), '|', RIGHT(trace_id, 8))
+  FROM idempotency_record
+ WHERE idempotency_key = '$medicationIdempotencyKey'
+   AND operation_scope = 'POST /api/v1/medication/tasks/checkin';
+"@
     Confirm-Chain '老人将今日一条未确认药盒任务打卡为 CONFIRMED' `
         ([string]$medicationCheckinJson.data.status -eq 'CONFIRMED') `
         'POST /api/v1/medication/tasks/checkin did not transition the selected task to CONFIRMED.'
+    $medicationCheckinReplay = Invoke-Api -Method 'POST' -Path '/api/v1/medication/tasks/checkin' `
+        -BearerToken $elderAccount.Token -IdempotencyKey $medicationIdempotencyKey -Body $medicationCheckinBody
+    $medicationIdempotencyState = Invoke-AppDatabaseQuery @"
+SELECT GROUP_CONCAT(CONCAT(operation_scope, ':', record_state, ':', response_status, ':', LEFT(SHA2(response_body, 256), 12)) ORDER BY record_id SEPARATOR ',')
+  FROM idempotency_record
+ WHERE idempotency_key = '$medicationIdempotencyKey';
+"@
+    $medicationCheckinCount = Invoke-AppDatabaseQuery "SELECT COUNT(*) FROM medication_checkin WHERE idempotency_key = '$medicationIdempotencyKey';"
+    $medicationFirstJson = try { ConvertFrom-Json -InputObject $medicationCheckinResponse.Content } catch { $null }
+    $medicationReplayJson = try { ConvertFrom-Json -InputObject $medicationCheckinReplay.Content } catch { $null }
+    $medicationFirstCode = if ($medicationFirstJson) { [string]$medicationFirstJson.code } else { 'INVALID_JSON' }
+    $medicationReplayCode = if ($medicationReplayJson) { [string]$medicationReplayJson.code } else { 'INVALID_JSON' }
+    $medicationFirstTrace = if ($medicationFirstJson -and $medicationFirstJson.traceId) { ([string]$medicationFirstJson.traceId).Substring(([string]$medicationFirstJson.traceId).Length - 8) } else { 'NONE' }
+    $medicationReplayTrace = if ($medicationReplayJson -and $medicationReplayJson.traceId) { ([string]$medicationReplayJson.traceId).Substring(([string]$medicationReplayJson.traceId).Length - 8) } else { 'NONE' }
+    $medicationTraceEqual = ($medicationFirstJson -and $medicationReplayJson -and [string]$medicationFirstJson.traceId -ceq [string]$medicationReplayJson.traceId)
+    $medicationBodyDiff = Get-RedactedJsonDiff -FirstJson $medicationCheckinResponse.Content -SecondJson $medicationCheckinReplay.Content
+    $medicationFirstBodyHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($medicationCheckinResponse.Content))).Substring(0, 12)
+    $medicationReplayBodyHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($medicationCheckinReplay.Content))).Substring(0, 12)
+    $medicationFirstContentType = [string]$medicationCheckinResponse.Response.Content.Headers.ContentType
+    $medicationReplayContentType = [string]$medicationCheckinReplay.Response.Content.Headers.ContentType
+    Confirm-Chain '药盒打卡通过 Idempotency-Key 重放原状态码与响应正文' `
+        ($medicationCheckinReplay.StatusCode -eq $medicationCheckinResponse.StatusCode -and
+            $medicationCheckinReplay.Content -ceq $medicationCheckinResponse.Content) `
+        ("The medication retry differed (status {0}/{1}, bodyEqual={2}, bodyHash={3}/{4}, contentType={5}/{6}, code={7}/{8}, traceEqual={9}({10}/{11}), diff={12}, before={13}, after={14}, checkins={15})." -f `
+            $medicationCheckinResponse.StatusCode, $medicationCheckinReplay.StatusCode,
+            ($medicationCheckinReplay.Content -ceq $medicationCheckinResponse.Content),
+            $medicationFirstBodyHash, $medicationReplayBodyHash, $medicationFirstContentType, $medicationReplayContentType,
+            $medicationFirstCode, $medicationReplayCode, $medicationTraceEqual, $medicationFirstTrace, $medicationReplayTrace,
+            $medicationBodyDiff,
+            $medicationIdempotencyBeforeReplay.StdOut.Trim(), $medicationIdempotencyState.StdOut.Trim(),
+            $medicationCheckinCount.StdOut.Trim())
 
     $boundEldersResponse = Invoke-Api -Method 'GET' -Path '/api/v1/family/links/my-elders' -BearerToken $childAccount.Token
     $boundEldersJson = Assert-OkApiResponse $boundEldersResponse 'Child bound-elder request'
@@ -1811,17 +1894,50 @@ SELECT CONCAT(
     $serviceDate = $dateBase.AddDays((Get-Random -Minimum 30 -Maximum 366)).ToString('yyyy-MM-dd')
     $slotCode = if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) { 'MORNING' } else { 'AFTERNOON' }
     $address = if ($elderProfileJson.data.address) { [string]$elderProfileJson.data.address } else { '隔离环境系统冒烟地址' }
-    $reservationResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' -BearerToken $childAccount.Token -Body @{
+    $reservationIdempotencyKey = 'SYSHTTP-RESERVATION-' + [Guid]::NewGuid().ToString('N')
+    $reservationSpecialNotes = 'system-http-smoke-' + [Guid]::NewGuid().ToString('N')
+    $reservationBody = @{
         elderId = 1
         serviceType = [string]$selectedCatalog.serviceType
         serviceDate = $serviceDate
         slotCode = $slotCode
         serviceAddress = $address
-        specialNotes = 'system-http-smoke-' + [Guid]::NewGuid().ToString('N')
+        specialNotes = $reservationSpecialNotes
     }
+    $reservationResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey $reservationIdempotencyKey -Body $reservationBody
     $reservationJson = Assert-OkApiResponse $reservationResponse 'Child reservation create request'
     $reservationId = [long]$reservationJson.data
     Confirm-That ($reservationId -gt 0) 'The child reservation response did not contain a valid reservation ID.'
+
+    Stop-TestApi
+    $reservationApiPortReleased = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if (-not (Test-TcpPortOpen $script:httpPort)) { $reservationApiPortReleased = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+    Confirm-Chain '预约首次写入后 API 已停止且随机 HTTP 端口释放' $reservationApiPortReleased `
+        'The first API process still owned its random HTTP port before the persistence replay check.'
+    $script:apiProcess = Start-TestApi 'reservation-idempotency-replay'
+    $null = Wait-ApiReady -Process $script:apiProcess -PhaseName 'reservation idempotency API restart'
+    $reservationReplayResponse = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey $reservationIdempotencyKey -Body $reservationBody
+    $reservationIdempotencyState = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body))
+  FROM idempotency_record
+ WHERE idempotency_key = '$reservationIdempotencyKey'
+   AND operation_scope = 'POST /api/v1/service-reservations';
+"@
+    $reservationCountAfterReplay = Invoke-AppDatabaseQuery "SELECT COUNT(*) FROM service_reservation WHERE special_notes = '$reservationSpecialNotes';"
+    $expectedReservationState = "COMPLETED|$($reservationResponse.StatusCode)|1"
+    Confirm-Chain 'API 重启后同键预约重放原 HTTP 状态码与 JSON 正文' `
+        ($reservationReplayResponse.StatusCode -eq $reservationResponse.StatusCode -and
+            $reservationReplayResponse.Content -ceq $reservationResponse.Content -and
+            $reservationIdempotencyState.ExitCode -eq 0 -and
+            $reservationIdempotencyState.StdOut.Trim() -eq $expectedReservationState -and
+            $reservationCountAfterReplay.ExitCode -eq 0 -and
+            $reservationCountAfterReplay.StdOut.Trim() -eq '1') `
+        'The restarted API did not replay the completed reservation response exactly once from the isolated database.'
     $reservationReadResponse = Invoke-Api -Method 'GET' -Path "/api/v1/service-reservations/$reservationId" -BearerToken $childAccount.Token
     $reservationReadJson = Assert-OkApiResponse $reservationReadResponse 'Child reservation readback'
     Confirm-Chain '子女创建唯一未来预约并读回待确认状态' `
@@ -1834,7 +1950,8 @@ SELECT CONCAT(
     Confirm-Chain '管理员待确认列表包含本次创建的预约' $pendingContainsReservation `
         'Administrator pending reservations did not include the child-created reservation.'
 
-    $confirmResponse = Invoke-Api -Method 'POST' -Path "/api/v1/admin/reservations/$reservationId/confirm" -CsrfToken $adminAccount.Csrf
+    $confirmResponse = Invoke-Api -Method 'POST' -Path "/api/v1/admin/reservations/$reservationId/confirm" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-RESERVATION-CONFIRM-' + [Guid]::NewGuid().ToString('N'))
     $confirmJson = Assert-OkApiResponse $confirmResponse 'Administrator reservation confirmation'
     $workOrderId = [long]$confirmJson.data
     Confirm-Chain '管理员通过 Web Cookie 与 CSRF 确认预约并生成工单' ($workOrderId -gt 0) `
@@ -1852,7 +1969,8 @@ SELECT CONCAT(
             [string]$workOrderJson.data.sourceType -eq 'RESERVATION') `
         'Reservation and generated work-order readback did not match the expected confirmed/pending-dispatch state.'
 
-    $dispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/dispatch" -CsrfToken $adminAccount.Csrf -Body @{
+    $dispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/dispatch" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-WORK-DISPATCH-' + [Guid]::NewGuid().ToString('N')) -Body @{
         assigneeUserId = $workerAccount.UserId
         reason = '隔离 HTTP 系统验收派单'
     }
@@ -1864,14 +1982,16 @@ SELECT CONCAT(
             [string]$dispatchedOrderJson.data.currentAssigneeId -eq [string]$workerAccount.UserId) `
         'POST /api/v1/work-orders/{id}/dispatch did not assign the order to the active community worker.'
 
-    $acceptResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/accept" -BearerToken $workerAccount.Token
+    $acceptResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/accept" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-WORK-ACCEPT-' + [Guid]::NewGuid().ToString('N'))
     $null = Assert-OkApiResponse $acceptResponse 'Grid-worker accept request'
     $acceptedOrderResponse = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$workOrderId" -BearerToken $workerAccount.Token
     $acceptedOrderJson = Assert-OkApiResponse $acceptedOrderResponse 'Accepted work-order readback'
     Confirm-Chain '网格员接单后状态为 ACCEPTED' `
         ([string]$acceptedOrderJson.data.status -eq 'ACCEPTED') `
         'POST /api/v1/work-orders/{id}/accept did not transition the assigned order to ACCEPTED.'
-    $startServiceResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/start" -BearerToken $workerAccount.Token
+    $startServiceResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/start" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-WORK-START-' + [Guid]::NewGuid().ToString('N'))
     $null = Assert-OkApiResponse $startServiceResponse 'Grid-worker start-service request'
     $processingOrderResponse = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$workOrderId" -BearerToken $workerAccount.Token
     $processingOrderJson = Assert-OkApiResponse $processingOrderResponse 'Processing work-order readback'
@@ -1892,7 +2012,8 @@ SELECT CONCAT(
             $null -ne $photoViewResponse -and $photoViewResponse.StatusCode -eq 200) `
         'POST /api/v1/files/upload failed to return a viewable PNG URL from the isolated application working directory.'
 
-    $executionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/execution" -BearerToken $workerAccount.Token -Body @{
+    $executionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/execution" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-WORK-EXECUTION-' + [Guid]::NewGuid().ToString('N')) -Body @{
         resultSummary = '已按预约完成上门照护与现场核验。'
         photoUrls = @($photoUrl)
         isExemptPhoto = $false
@@ -1905,7 +2026,8 @@ SELECT CONCAT(
             @($reviewPendingJson.data.photoUrls | Where-Object { $_ -eq $photoUrl }).Count -gt 0) `
         'POST /api/v1/work-orders/{id}/execution did not persist the summary photo and pending-review status.'
 
-    $reviewResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/review" -CsrfToken $adminAccount.Csrf -Body @{
+    $reviewResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-WORK-REVIEW-' + [Guid]::NewGuid().ToString('N')) -Body @{
         action = 'APPROVE'
         reviewComment = '现场履约凭据完整，审核通过。'
     }
@@ -1922,10 +2044,11 @@ SELECT CONCAT(
             [string]$closedOrderJson.data.sourceType -eq 'RESERVATION') `
         'GET /api/v1/service-reservations/{id} did not read back COMPLETED with its CLOSED reservation work order.'
 
-    $sosTriggerResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' -BearerToken $elderAccount.Token -Body @{
+    $sosIdempotencyKey = 'SYSHTTP-SOS-' + [Guid]::NewGuid().ToString('N')
+    $sosTriggerResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' `
+        -BearerToken $elderAccount.Token -IdempotencyKey $sosIdempotencyKey -Body @{
         pressDurationMs = 2500
         locationAddress = $address
-        idempotencyKey = 'SYSHTTP-SOS-' + [Guid]::NewGuid().ToString('N')
     }
     $sosTriggerJson = Assert-OkApiResponse $sosTriggerResponse 'Elder SOS trigger'
     $sosId = [long]$sosTriggerJson.data.sosId
@@ -1934,12 +2057,14 @@ SELECT CONCAT(
         ($sosId -gt 0 -and $sosWorkOrderId -gt 0 -and [string]$sosTriggerJson.data.status -eq 'ACCEPTED') `
         'POST /api/v1/emergency/sos/trigger did not return an accepted SOS and generated emergency work order.'
 
-    $sosDispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosId/dispatch" -CsrfToken $adminAccount.Csrf -Body @{
+    $sosDispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosId/dispatch" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-SOS-DISPATCH-' + [Guid]::NewGuid().ToString('N')) -Body @{
         assigneeId = $workerAccount.UserId
         dispatchReason = '隔离 HTTP 系统验收 SOS 调度'
     }
     $null = Assert-OkApiResponse $sosDispatchResponse 'Administrator SOS dispatch'
-    $sosCloseResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosId/close" -CsrfToken $adminAccount.Csrf -Body @{
+    $sosCloseResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosId/close" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-SOS-CLOSE-' + [Guid]::NewGuid().ToString('N')) -Body @{
         resultSummary = '已电话联系并现场确认老人安全，完成紧急协助处置。'
         isFalseAlarm = $false
     }
@@ -1953,6 +2078,39 @@ SELECT CONCAT(
         ($closedSos.Count -eq 1 -and [string]$closedSos[0].workOrderId -eq [string]$sosWorkOrderId -and
             [string]$sosOrderReadJson.data.status -eq 'CLOSED' -and [string]$sosOrderReadJson.data.sourceType -eq 'SOS') `
         'POST /api/v1/emergency/sos/{id}/dispatch or /close did not leave both the SOS and generated work order closed.'
+
+    $sosCancelTriggerResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' `
+        -BearerToken $elderAccount.Token -IdempotencyKey ('SYSHTTP-SOS-CANCEL-TRIGGER-' + [Guid]::NewGuid().ToString('N')) -Body @{
+        pressDurationMs = 2500
+        locationAddress = $address
+    }
+    $sosCancelTriggerJson = Assert-OkApiResponse $sosCancelTriggerResponse 'Elder SOS trigger for cancellation replay'
+    $sosCancelId = [long]$sosCancelTriggerJson.data.sosId
+    $sosCancelWorkOrderId = [long]$sosCancelTriggerJson.data.workOrderId
+    Confirm-Chain '取消重放夹具已生成 SOS 与关联工单' `
+        ($sosCancelId -gt 0 -and $sosCancelWorkOrderId -gt 0 -and [string]$sosCancelTriggerJson.data.status -eq 'ACCEPTED') `
+        'The isolated cancellation replay fixture did not create an accepted SOS and its work order.'
+    $sosCancelKey = 'SYSHTTP-SOS-CANCEL-' + [Guid]::NewGuid().ToString('N')
+    $sosCancelBody = @{ cancelReason = '隔离 HTTP 幂等验收：老人确认误触' }
+    $sosCancelResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosCancelId/cancel" `
+        -BearerToken $elderAccount.Token -IdempotencyKey $sosCancelKey -Body $sosCancelBody
+    $null = Assert-OkApiResponse $sosCancelResponse 'Elder SOS cancellation'
+    $sosCancelReplay = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosCancelId/cancel" `
+        -BearerToken $elderAccount.Token -IdempotencyKey $sosCancelKey -Body $sosCancelBody
+    $null = Assert-OkApiResponse $sosCancelReplay 'Elder SOS cancellation replay'
+    $sosCancelReadResponse = Invoke-Api -Method 'GET' -Path '/api/v1/emergency/sos/active' -BearerToken $elderAccount.Token
+    $sosCancelReadJson = Assert-OkApiResponse $sosCancelReadResponse 'Cancelled SOS readback'
+    $sosCancelHistoryCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_action_history
+ WHERE work_order_id = $sosCancelWorkOrderId AND action_name = 'ELDER_CANCEL';
+"@
+    Confirm-Chain '老人 SOS 取消通过同键原响应重放且业务历史只写入一次' `
+        ($sosCancelResponse.StatusCode -eq $sosCancelReplay.StatusCode -and
+            $sosCancelResponse.Content -ceq $sosCancelReplay.Content -and
+            [string]$sosCancelReadJson.data.sosId -eq [string]$sosCancelId -and
+            [string]$sosCancelReadJson.data.status -eq 'CANCELLED' -and
+            [int]$sosCancelHistoryCount.StdOut.Trim() -eq 1) `
+        'Elder SOS cancellation replay did not preserve the original response or created more than one cancellation history row.'
 
     $closureWebContext = New-TestHttpClient
     $closureMiniContext = New-TestHttpClient

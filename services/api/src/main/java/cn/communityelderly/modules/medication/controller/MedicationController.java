@@ -2,6 +2,7 @@ package cn.communityelderly.modules.medication.controller;
 
 import cn.communityelderly.common.api.Result;
 import cn.communityelderly.common.idempotency.Idempotency;
+import cn.communityelderly.common.idempotency.IdempotencyInterceptor;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.modules.medication.dto.*;
 import cn.communityelderly.modules.medication.service.MedicationComplianceService;
@@ -66,9 +67,12 @@ public class MedicationController {
 
     // 6. 老人服药一键打卡确认 (带幂等)
     @PostMapping("/tasks/checkin")
-    @Idempotency(required = false)
+    @Idempotency(required = true)
     @RequireRoles({"ELDER"})
-    public Result<MedicationTaskVO> checkin(@Valid @RequestBody MedicationCheckinDTO dto) {
+    public Result<MedicationTaskVO> checkin(
+            @Valid @RequestBody MedicationCheckinDTO dto,
+            @RequestHeader(IdempotencyInterceptor.IDEMPOTENCY_KEY_HEADER) String idempotencyKey) {
+        dto.setIdempotencyKey(idempotencyKey.trim());
         return Result.success(taskService.checkin(dto));
     }
 

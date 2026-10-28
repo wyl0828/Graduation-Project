@@ -25,7 +25,7 @@ public class ServiceReservationController {
     }
 
     @PostMapping
-    @Idempotency(required = false)
+    @Idempotency(required = true)
     @RequireRoles({"CHILD"})
     public Result<Long> createReservation(@Valid @RequestBody ReservationCreateDTO dto) {
         CurrentUser user = UserContext.requireCurrentUser();
@@ -53,6 +53,7 @@ public class ServiceReservationController {
     }
 
     @PostMapping("/{reservationId}/cancel")
+    @Idempotency(required = true)
     @RequireRoles({"CHILD"})
     public Result<Void> cancelReservation(@PathVariable Long reservationId,
                                           @Valid @RequestBody ReservationCancelDTO dto) {

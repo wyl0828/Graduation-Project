@@ -48,6 +48,7 @@ public enum ErrorCode {
     DUPLICATE_OPERATION(409, "重复操作已被拦截"),
 
     // 系统内部错误 (500)
+    IDEMPOTENCY_UNAVAILABLE(503, "幂等保护暂不可用，请稍后重试"),
     INTERNAL_SERVER_ERROR(500, "系统繁忙，请稍后重试");
 
     private final int httpStatus;

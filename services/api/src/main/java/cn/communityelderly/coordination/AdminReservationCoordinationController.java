@@ -1,6 +1,7 @@
 package cn.communityelderly.coordination;
 
 import cn.communityelderly.common.api.Result;
+import cn.communityelderly.common.idempotency.Idempotency;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.common.security.UserContext;
@@ -28,6 +29,7 @@ public class AdminReservationCoordinationController {
     }
 
     @PostMapping("/{reservationId}/confirm")
+    @Idempotency(required = true)
     public Result<Long> confirmReservation(@PathVariable Long reservationId) {
         CurrentUser user = UserContext.requireCurrentUser();
         Long workOrderId = coordinator.confirmReservationAndCreateWorkOrder(reservationId, Long.parseLong(user.getUserId()));
@@ -35,6 +37,7 @@ public class AdminReservationCoordinationController {
     }
 
     @PostMapping("/{reservationId}/reject")
+    @Idempotency(required = true)
     public Result<Void> rejectReservation(@PathVariable Long reservationId,
                                           @Valid @RequestBody ReservationCancelDTO dto) {
         CurrentUser user = UserContext.requireCurrentUser();

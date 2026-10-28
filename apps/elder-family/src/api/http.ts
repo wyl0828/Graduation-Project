@@ -19,7 +19,12 @@ class UniHttpClient {
     return uni.getStorageSync('token') || ''
   }
 
-  request<T = any>(endpoint: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET', data?: any): Promise<ApiResponse<T>> {
+  request<T = any>(
+    endpoint: string,
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET',
+    data?: any,
+    requestHeaders?: Record<string, string>,
+  ): Promise<ApiResponse<T>> {
     if (!this.baseUrl && !endpoint.startsWith('http')) {
       const error: ApiError = new Error('未配置可访问的 API 地址（VITE_API_BASE_URL）')
       error.code = 'API_BASE_URL_MISSING'
@@ -34,6 +39,7 @@ class UniHttpClient {
     if (token) {
       headers['Authorization'] = `Bearer ${token}`
     }
+    if (requestHeaders) Object.assign(headers, requestHeaders)
 
     return new Promise((resolve, reject) => {
       uni.request({
@@ -59,7 +65,9 @@ class UniHttpClient {
               uni.removeStorageSync('user')
               uni.removeStorageSync('activeRole')
               const current = getCurrentPages().at(-1)
-              if (current && current.route !== 'pages/auth/login') {
+              const hasIdempotencyKey = Object.keys(requestHeaders || {})
+                .some(name => name.toLowerCase() === 'idempotency-key')
+              if (!hasIdempotencyKey && current && current.route !== 'pages/auth/login') {
                 uni.reLaunch({ url: '/pages/auth/login' })
               }
             }
@@ -79,7 +87,7 @@ class UniHttpClient {
     })
   }
 
-  get<T = any>(endpoint: string, params?: Record<string, any>): Promise<ApiResponse<T>> {
+  get<T = any>(endpoint: string, params?: Record<string, any>, requestHeaders?: Record<string, string>): Promise<ApiResponse<T>> {
     let url = endpoint
     if (params && typeof params === 'object') {
       const query = Object.entries(params)
@@ -90,19 +98,19 @@ class UniHttpClient {
         url += (url.includes('?') ? '&' : '?') + query
       }
     }
-    return this.request<T>(url, 'GET')
+    return this.request<T>(url, 'GET', undefined, requestHeaders)
   }
 
-  post<T = any>(endpoint: string, data?: any): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, 'POST', data)
+  post<T = any>(endpoint: string, data?: any, requestHeaders?: Record<string, string>): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, 'POST', data, requestHeaders)
   }
 
-  put<T = any>(endpoint: string, data?: any): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, 'PUT', data)
+  put<T = any>(endpoint: string, data?: any, requestHeaders?: Record<string, string>): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, 'PUT', data, requestHeaders)
   }
 
-  delete<T = any>(endpoint: string, data?: any): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, 'DELETE', data)
+  delete<T = any>(endpoint: string, data?: any, requestHeaders?: Record<string, string>): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, 'DELETE', data, requestHeaders)
   }
 }
 

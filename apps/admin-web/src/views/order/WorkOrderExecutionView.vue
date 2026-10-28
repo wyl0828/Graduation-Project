@@ -233,7 +233,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, type UploadRequestOptions } from 'element-plus'
 import type { ApiError } from '../../api/http'
-import { adminApi } from '../../api/adminApi'
+import { adminApi, clearPendingIdempotencyKey } from '../../api/adminApi'
 
 type WorkOrder = {
   workOrderId: number
@@ -301,7 +301,9 @@ const reportOrderLabel = computed(() => {
 function apiErrorMessage(error: unknown) {
   const apiError = error as ApiError
   if (apiError?.status === 401) return '登录状态已失效，请重新登录后再操作。'
-  if (apiError?.status === 409) return '工单状态已变化，本次操作未确认成功；请刷新后查看服务端状态并重试。'
+  if (apiError?.status === 409) return apiError.message
+    ? `服务端暂未确认操作（HTTP 409）：${apiError.message}`
+    : '服务端暂未确认操作（HTTP 409），请稍后核对服务端状态再重试。'
   if (apiError?.status) return apiError.message || `服务端请求失败（HTTP ${apiError.status}）`
   if (error instanceof Error) return error.message
   return '服务暂不可用，请检查网络后重试。'
@@ -410,6 +412,8 @@ async function transitionWorkerOrder(order: WorkOrder, action: 'accept' | 'start
     else await adminApi.startWorkOrder(order.workOrderId)
 
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, nextStatus)
+    const endpoint = `/work-orders/${order.workOrderId}/${action}`
+    clearPendingIdempotencyKey('POST', endpoint)
     replaceOrder(confirmedOrder)
     ElMessage.success(action === 'accept' ? '接单状态已由服务端详情确认。' : '服务开始状态已由服务端详情确认。')
     await loadData()
@@ -553,14 +557,16 @@ async function handleSubmitReport() {
   submittingReport.value = true
   operationError.value = ''
   try {
-    await adminApi.submitWorkOrderResult(order.workOrderId, {
+    const requestBody = {
       resultSummary: summary,
       photoUrls: exempt ? [] : photoUrls,
       isExemptPhoto: exempt,
       photoExemptionReason: exempt ? exemptionReason : undefined,
-    })
+    }
+    await adminApi.submitWorkOrderResult(order.workOrderId, requestBody)
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, 'PENDING_RESULT_REVIEW')
     assertExecutionResultConfirmed(confirmedOrder, summary, photoUrls, exempt, exemptionReason)
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/execution/submit`, requestBody)
     replaceOrder(confirmedOrder)
     reportModalVisible.value = false
     ElMessage.success('服务成果及凭据已由服务端详情回读确认，已进入管理员审核。')
@@ -610,7 +616,8 @@ async function submitReview(action: 'APPROVE' | 'REJECT') {
   reviewAction.value = action
   operationError.value = ''
   try {
-    await adminApi.reviewWorkOrder(order.workOrderId, { action, reviewComment: comment })
+    const requestBody = { action, reviewComment: comment }
+    await adminApi.reviewWorkOrder(order.workOrderId, requestBody)
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, expectedStatus)
     if (action === 'APPROVE' && confirmedOrder.reviewComment !== comment) {
       throw new Error('审核请求已返回，但详情未确认审核意见；页面保留本次输入，请刷新后重试。')
@@ -618,6 +625,7 @@ async function submitReview(action: 'APPROVE' | 'REJECT') {
     if (action === 'REJECT' && !confirmedOrder.reviewComment?.includes(comment)) {
       throw new Error('驳回请求已返回，但详情未确认驳回意见；页面保留本次输入，请刷新后重试。')
     }
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/review`, requestBody)
     pendingReviewOrders.value = pendingReviewOrders.value.filter(item => item.workOrderId !== confirmedOrder.workOrderId)
     reviewModalVisible.value = false
     ElMessage.success(action === 'APPROVE' ? '结案状态已由服务端详情确认。' : '退回重办状态已由服务端详情确认。')
