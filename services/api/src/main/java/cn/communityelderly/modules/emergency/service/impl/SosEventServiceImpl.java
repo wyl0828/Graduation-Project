@@ -77,7 +77,10 @@ public class SosEventServiceImpl implements SosEventService {
             throw inaccessible();
         }
         // 求助对象由服务端会话决定；请求体 ID 只用于拒绝跨老人伪造，不授予访问权。
-        ElderProfile elder = authorizationPolicy.requireElderAccess(selfElderId);
+        authorizationPolicy.requireElderAccess(selfElderId);
+        // Serialize acceptance with archive deactivation and snapshot the status observed under lock.
+        ElderProfile elder = elderProfileMapper.selectByIdForUpdate(selfElderId);
+        if (elder == null) throw inaccessible();
         if (elder.getCommunityId() == null) throw inaccessible();
 
         CurrentUser user = authorizationPolicy.requireCurrentUser();
@@ -135,6 +138,7 @@ public class SosEventServiceImpl implements SosEventService {
         sosEvent.setInitialWorkOrderId(workOrder.getWorkOrderId());
         sosEvent.setIdempotencyKey(idempotencyKey);
         sosEvent.setOccurredAt(now);
+        sosEvent.setElderInactiveAtAcceptance("INACTIVE".equalsIgnoreCase(elder.getStatus()));
         sosEventMapper.insert(sosEvent);
 
         // 回填 source_reference_id
@@ -407,6 +411,7 @@ public class SosEventServiceImpl implements SosEventService {
         vo.setStatus(sos.getStatus());
         vo.setPressDurationMs(sos.getPressDurationMs());
         vo.setOccurredAt(sos.getOccurredAt());
+        vo.setElderInactiveAtAcceptance(sos.getElderInactiveAtAcceptance());
 
         ElderProfile elder = elderProfileMapper.selectById(sos.getElderId());
         if (elder != null) {

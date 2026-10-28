@@ -21,18 +21,24 @@ import cn.communityelderly.modules.emergency.entity.WorkOrderActionHistory;
 import cn.communityelderly.modules.emergency.entity.WorkOrderAssignmentHistory;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderActionHistoryMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderAssignmentHistoryMapper;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderHandoffMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderMapper;
 import cn.communityelderly.modules.order.dto.WorkOrderDispatchDTO;
 import cn.communityelderly.modules.order.dto.WorkOrderExecutionDTO;
 import cn.communityelderly.modules.order.dto.WorkOrderVO;
+import cn.communityelderly.modules.order.mapper.ServiceStopRequestMapper;
 import cn.communityelderly.modules.order.service.impl.WorkOrderServiceImpl;
+import cn.communityelderly.modules.notification.service.NotificationService;
 import cn.communityelderly.modules.reservation.mapper.ReservationExecutionLinkMapper;
 import cn.communityelderly.modules.reservation.mapper.ServiceReservationMapper;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -369,6 +375,7 @@ class WorkOrderCareWorkerAuthorizationTest {
         WorkOrder order = workOrder(214L, 22L, COMMUNITY_ID, null, "PENDING_DISPATCH");
         when(fixture.workOrderMapper.selectById(214L)).thenReturn(order);
         when(fixture.elderMapper.selectById(22L)).thenReturn(elder(22L, COMMUNITY_ID));
+        when(fixture.workOrderMapper.updateById(order)).thenReturn(1);
 
         assertDoesNotThrow(() -> fixture.service.dispatchOrder(214L, dispatch(88L), 10L));
 
@@ -447,9 +454,11 @@ class WorkOrderCareWorkerAuthorizationTest {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(fixture.elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
         fixture.service = new WorkOrderServiceImpl(fixture.workOrderMapper, fixture.assignmentHistoryMapper,
-                fixture.actionHistoryMapper, fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
+                fixture.actionHistoryMapper, mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
+                fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
                 mock(ReservationExecutionLinkMapper.class), mock(ServiceReservationMapper.class), policy,
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), mock(NotificationService.class), new ObjectMapper(),
+                Clock.system(ZoneId.of("Asia/Shanghai")));
 
         UserContext.set(user(String.valueOf(CARE_WORKER_ID), "CARE_WORKER", String.valueOf(COMMUNITY_ID)));
         when(fixture.userAccountMapper.selectById(CARE_WORKER_ID)).thenReturn(staffAccount(CARE_WORKER_ID));
@@ -471,9 +480,11 @@ class WorkOrderCareWorkerAuthorizationTest {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(fixture.elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
         fixture.service = new WorkOrderServiceImpl(fixture.workOrderMapper, fixture.assignmentHistoryMapper,
-                fixture.actionHistoryMapper, fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
+                fixture.actionHistoryMapper, mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
+                fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
                 mock(ReservationExecutionLinkMapper.class), mock(ServiceReservationMapper.class), policy,
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), mock(NotificationService.class), new ObjectMapper(),
+                Clock.system(ZoneId.of("Asia/Shanghai")));
 
         UserContext.set(user("10", "COMMUNITY_ADMIN", String.valueOf(COMMUNITY_ID)));
         when(fixture.userAccountMapper.selectById(88L)).thenReturn(targetAccount);

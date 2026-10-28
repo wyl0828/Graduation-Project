@@ -16,6 +16,7 @@ import cn.communityelderly.modules.auth.mapper.UserAccountMapper;
 import cn.communityelderly.modules.auth.mapper.UserRoleMapper;
 import cn.communityelderly.modules.auth.service.StaffManagementService;
 import cn.communityelderly.modules.auth.service.impl.StaffManagementServiceImpl;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
@@ -52,6 +53,7 @@ class StaffManagementServiceTest {
     private UserRoleMapper userRoleMapper;
     private AuthSessionMapper authSessionMapper;
     private AuditLogService auditLogService;
+    private WorkOrderService workOrderService;
     private StaffManagementService staffManagementService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -61,8 +63,9 @@ class StaffManagementServiceTest {
         userRoleMapper = mock(UserRoleMapper.class);
         authSessionMapper = mock(AuthSessionMapper.class);
         auditLogService = mock(AuditLogService.class);
+        workOrderService = mock(WorkOrderService.class);
         staffManagementService = new StaffManagementServiceImpl(
-                userAccountMapper, userRoleMapper, authSessionMapper, auditLogService, objectMapper);
+                userAccountMapper, userRoleMapper, authSessionMapper, auditLogService, workOrderService, objectMapper);
 
         UserContext.set(new CurrentUser("10", "13800000010", "STAFF",
                 List.of("COMMUNITY_ADMIN"), "COMMUNITY_ADMIN", "77", 701L, "admin-session-1"));

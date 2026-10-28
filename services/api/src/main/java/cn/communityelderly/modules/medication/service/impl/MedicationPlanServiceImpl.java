@@ -6,7 +6,7 @@ import cn.communityelderly.common.security.ObjectAuthorizationPolicy;
 import cn.communityelderly.modules.auth.entity.UserAccount;
 import cn.communityelderly.modules.auth.mapper.UserAccountMapper;
 import cn.communityelderly.modules.elder.entity.ElderProfile;
-import cn.communityelderly.modules.elder.entity.ElderProfile;
+import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.medication.dto.*;
 import cn.communityelderly.modules.medication.entity.MedicationPlan;
 import cn.communityelderly.modules.medication.entity.MedicationPlanReminderTime;
@@ -18,13 +18,16 @@ import cn.communityelderly.modules.medication.mapper.MedicationPlanVersionMapper
 import cn.communityelderly.modules.medication.mapper.MedicationTaskMapper;
 import cn.communityelderly.modules.medication.service.MedicationPlanService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -40,19 +43,49 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
     private final MedicationTaskMapper taskMapper;
     private final ObjectAuthorizationPolicy authorizationPolicy;
     private final UserAccountMapper userAccountMapper;
+    private final ElderProfileMapper elderProfileMapper;
+    private final Clock clock;
 
+    @Autowired
     public MedicationPlanServiceImpl(MedicationPlanMapper planMapper,
                                      MedicationPlanVersionMapper versionMapper,
                                      MedicationPlanReminderTimeMapper reminderTimeMapper,
                                      MedicationTaskMapper taskMapper,
                                      ObjectAuthorizationPolicy authorizationPolicy,
-                                     UserAccountMapper userAccountMapper) {
+                                     UserAccountMapper userAccountMapper,
+                                     ElderProfileMapper elderProfileMapper,
+                                     Clock clock) {
         this.planMapper = planMapper;
         this.versionMapper = versionMapper;
         this.reminderTimeMapper = reminderTimeMapper;
         this.taskMapper = taskMapper;
         this.authorizationPolicy = authorizationPolicy;
         this.userAccountMapper = userAccountMapper;
+        this.elderProfileMapper = elderProfileMapper;
+        this.clock = clock;
+    }
+
+    /** Compatibility for direct constructions outside Spring. */
+    public MedicationPlanServiceImpl(MedicationPlanMapper planMapper,
+                                     MedicationPlanVersionMapper versionMapper,
+                                     MedicationPlanReminderTimeMapper reminderTimeMapper,
+                                     MedicationTaskMapper taskMapper,
+                                     ObjectAuthorizationPolicy authorizationPolicy,
+                                     UserAccountMapper userAccountMapper,
+                                     Clock clock) {
+        this(planMapper, versionMapper, reminderTimeMapper, taskMapper, authorizationPolicy,
+                userAccountMapper, null, clock);
+    }
+
+    /** Compatibility for direct constructions outside Spring; runtime wiring uses the Clock bean. */
+    public MedicationPlanServiceImpl(MedicationPlanMapper planMapper,
+                                     MedicationPlanVersionMapper versionMapper,
+                                     MedicationPlanReminderTimeMapper reminderTimeMapper,
+                                     MedicationTaskMapper taskMapper,
+                                     ObjectAuthorizationPolicy authorizationPolicy,
+                                     UserAccountMapper userAccountMapper) {
+        this(planMapper, versionMapper, reminderTimeMapper, taskMapper, authorizationPolicy, userAccountMapper,
+                Clock.system(ZoneId.of("Asia/Shanghai")));
     }
 
     @Override
@@ -60,8 +93,11 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
     public MedicationPlanVO createPlan(MedicationPlanCreateDTO dto) {
         authorizationPolicy.requireRole("CHILD");
         authorizationPolicy.requireElderAccess(dto.getElderId());
+        ElderProfile elder = lockElder(dto.getElderId());
+        requireActiveElder(elder, "停用档案不能新建用药计划");
         Long userId = Long.parseLong(authorizationPolicy.requireCurrentUser().getUserId());
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(clock);
+        LocalDate today = now.toLocalDate();
 
         // 1. 插入计划主表
         MedicationPlan plan = new MedicationPlan();
@@ -77,7 +113,7 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
         planMapper.insert(plan);
 
         // 2. 插入首个版本表 (v1)
-        LocalDate startDate = Boolean.TRUE.equals(dto.getRefreshTodayPending()) ? LocalDate.now() : LocalDate.now().plusDays(1);
+        LocalDate startDate = Boolean.TRUE.equals(dto.getRefreshTodayPending()) ? today : today.plusDays(1);
         MedicationPlanVersion version = new MedicationPlanVersion();
         version.setPlanId(plan.getPlanId());
         version.setVersionNo(1);
@@ -95,7 +131,7 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
 
         // 4. 若勾选当日生效且有提醒时段，立即生成今日未到期任务快照
         if (Boolean.TRUE.equals(dto.getRefreshTodayPending())) {
-            refreshTodayPendingTasks(plan, version, dto.getReminderTimes());
+            refreshTodayPendingTasks(plan, version, dto.getReminderTimes(), now);
         }
 
         return getPlanDetail(plan.getPlanId());
@@ -111,15 +147,31 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
         }
 
         authorizationPolicy.requireElderAccess(plan.getElderId());
+        ElderProfile elder = lockElder(plan.getElderId());
+        if (!"ACTIVE".equalsIgnoreCase(elder.getStatus())
+                && Boolean.TRUE.equals(dto.getRefreshTodayPending())) {
+            throw new BusinessException(ErrorCode.ORDER_STATUS_INVALID, "停用档案不能刷新当日用药任务");
+        }
 
         Long userId = Long.parseLong(authorizationPolicy.requireCurrentUser().getUserId());
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(clock);
+        LocalDate today = now.toLocalDate();
 
         int newVersionNo = plan.getCurrentVersionNo() + 1;
         String newDosage = StringUtils.hasText(dto.getDosage()) ? dto.getDosage().trim() : plan.getDosage();
         String newUsageMethod = StringUtils.hasText(dto.getUsageMethod()) ? dto.getUsageMethod().trim() : plan.getUsageMethod();
 
-        LocalDate startDate = Boolean.TRUE.equals(dto.getRefreshTodayPending()) ? LocalDate.now() : LocalDate.now().plusDays(1);
+        LocalDate startDate = Boolean.TRUE.equals(dto.getRefreshTodayPending()) ? today : today.plusDays(1);
+
+        MedicationPlanVersion oldVersion = versionMapper.selectOne(
+                new LambdaQueryWrapper<MedicationPlanVersion>()
+                        .eq(MedicationPlanVersion::getPlanId, plan.getPlanId())
+                        .eq(MedicationPlanVersion::getVersionNo, plan.getCurrentVersionNo())
+        );
+        if (oldVersion != null) {
+            oldVersion.setEndDate(startDate.minusDays(1));
+            versionMapper.updateById(oldVersion);
+        }
 
         // 1. 生成新版本记录 (版本不可逆覆盖)
         MedicationPlanVersion newVersion = new MedicationPlanVersion();
@@ -146,7 +198,7 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
 
         // 4. 当日应急刷新逻辑 (用户特别要求)
         if (Boolean.TRUE.equals(dto.getRefreshTodayPending())) {
-            refreshTodayPendingTasks(plan, newVersion, dto.getReminderTimes());
+            refreshTodayPendingTasks(plan, newVersion, dto.getReminderTimes(), now);
         }
 
         return getPlanDetail(plan.getPlanId());
@@ -246,8 +298,10 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
         }
     }
 
-    private void refreshTodayPendingTasks(MedicationPlan plan, MedicationPlanVersion version, List<MedicationPlanCreateDTO.ReminderTimeItem> items) {
-        LocalDate today = LocalDate.now();
+    private void refreshTodayPendingTasks(MedicationPlan plan, MedicationPlanVersion version,
+                                          List<MedicationPlanCreateDTO.ReminderTimeItem> items,
+                                          LocalDateTime now) {
+        LocalDate today = now.toLocalDate();
 
         // 1. 查询今日已存在的任务
         List<MedicationTask> todayTasks = taskMapper.selectList(
@@ -266,7 +320,6 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
         }
 
         // 3. 重新插入新版未开始任务
-        LocalDateTime now = LocalDateTime.now();
         for (MedicationPlanCreateDTO.ReminderTimeItem item : items) {
             LocalTime scheduledTime = parseTime(item.getReminderTime());
 
@@ -288,6 +341,22 @@ public class MedicationPlanServiceImpl implements MedicationPlanService {
             newTask.setStatus("PENDING");
             newTask.setCreatedAt(now);
             taskMapper.insert(newTask);
+        }
+    }
+
+    private ElderProfile lockElder(Long elderId) {
+        ElderProfile elder = elderProfileMapper == null
+                ? authorizationPolicy.requireElderAccess(elderId)
+                : elderProfileMapper.selectByIdForUpdate(elderId);
+        if (elder == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        return elder;
+    }
+
+    private void requireActiveElder(ElderProfile elder, String message) {
+        if (!"ACTIVE".equalsIgnoreCase(elder.getStatus())) {
+            throw new BusinessException(ErrorCode.ORDER_STATUS_INVALID, message);
         }
     }
 

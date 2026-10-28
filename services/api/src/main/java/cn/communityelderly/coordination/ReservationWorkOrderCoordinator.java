@@ -23,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -41,6 +42,7 @@ public class ReservationWorkOrderCoordinator {
     private final ServiceReservationService reservationService;
     private final ObjectAuthorizationPolicy authorizationPolicy;
     private final AuditLogService auditLogService;
+    private final Clock clock;
 
     public ReservationWorkOrderCoordinator(ServiceReservationMapper reservationMapper,
                                           ReservationExecutionLinkMapper executionLinkMapper,
@@ -49,7 +51,8 @@ public class ReservationWorkOrderCoordinator {
                                           ElderProfileMapper elderProfileMapper,
                                           ServiceReservationService reservationService,
                                           ObjectAuthorizationPolicy authorizationPolicy,
-                                          AuditLogService auditLogService) {
+                                          AuditLogService auditLogService,
+                                          Clock clock) {
         this.reservationMapper = reservationMapper;
         this.executionLinkMapper = executionLinkMapper;
         this.workOrderMapper = workOrderMapper;
@@ -58,6 +61,7 @@ public class ReservationWorkOrderCoordinator {
         this.reservationService = reservationService;
         this.authorizationPolicy = authorizationPolicy;
         this.auditLogService = auditLogService;
+        this.clock = clock;
     }
 
     /**
@@ -66,25 +70,44 @@ public class ReservationWorkOrderCoordinator {
     @Transactional
     public Long confirmReservationAndCreateWorkOrder(Long reservationId, Long reviewerUserId) {
         requireCommunityAdministrator(reviewerUserId);
-        ServiceReservation reservation = reservationMapper.selectById(reservationId);
-        if (reservation == null) {
+        ServiceReservation reservationSnapshot = reservationMapper.selectById(reservationId);
+        if (reservationSnapshot == null) {
             throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
         }
-        ElderProfile elder = authorizationPolicy.requireElderInCurrentCommunity(
-                reservation.getElderId(), "COMMUNITY_ADMIN");
+
+        // Serialize confirmation against archive deactivation with lock order:
+        // elder -> reservation -> generated work order.
+        ElderProfile authorizedElder = authorizationPolicy.requireElderInCurrentCommunity(
+                reservationSnapshot.getElderId(), "COMMUNITY_ADMIN");
+        ElderProfile elder = elderProfileMapper.selectByIdForUpdate(reservationSnapshot.getElderId());
+        if (elder == null || authorizedElder == null || authorizedElder.getCommunityId() == null
+                || !authorizedElder.getCommunityId().equals(elder.getCommunityId())) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        if (!"ACTIVE".equalsIgnoreCase(elder.getStatus())) {
+            throw new BusinessException(ErrorCode.ORDER_STATUS_INVALID, "老人档案已停用，不能确认预约");
+        }
+
+        ServiceReservation reservation = reservationMapper.selectByIdForUpdate(reservationId);
+        if (reservation == null || !reservationSnapshot.getElderId().equals(reservation.getElderId())) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
         if (!"PENDING_CONFIRMATION".equals(reservation.getStatus())) {
             throw new BusinessException(ErrorCode.ORDER_STATUS_INVALID, "只有待确认状态的预约才可审核受理");
         }
 
         // 1. 推进预约状态
         reservation.setStatus("CONFIRMED");
-        reservationMapper.updateById(reservation);
+        if (reservationMapper.updateById(reservation) < 1) {
+            throw new BusinessException(ErrorCode.OPTIMISTIC_LOCK_CONFLICT,
+                    "预约已被其他操作更新，请刷新后重试");
+        }
 
         // 2. 查取老人信息
         Long communityId = requireElderCommunityId(elder);
 
         // 3. 原子生成待派发工单
-        String timestampPrefix = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").format(LocalDateTime.now());
+        String timestampPrefix = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").format(LocalDateTime.now(clock));
         String randomSuffix = UUID.randomUUID().toString().replace("-", "").substring(0, 4).toUpperCase();
         String orderNo = "WO" + timestampPrefix + randomSuffix;
 
@@ -158,7 +181,10 @@ public class ReservationWorkOrderCoordinator {
 
         reservation.setStatus("REJECTED");
         reservation.setRejectReason(reason);
-        reservationMapper.updateById(reservation);
+        if (reservationMapper.updateById(reservation) < 1) {
+            throw new BusinessException(ErrorCode.OPTIMISTIC_LOCK_CONFLICT,
+                    "预约已被其他操作更新，请刷新后重试");
+        }
 
         Long communityId = requireElderCommunityId(elder);
 

@@ -18,6 +18,7 @@ import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.elder.service.ElderArchiveService;
 import cn.communityelderly.modules.elder.service.KinshipService;
 import cn.communityelderly.modules.elder.service.impl.ElderArchiveServiceImpl;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import cn.communityelderly.modules.emergency.dto.SosCancelDTO;
 import cn.communityelderly.modules.emergency.dto.SosTriggerDTO;
 import cn.communityelderly.modules.emergency.entity.SosEvent;
@@ -125,7 +126,8 @@ class ObjectAuthorizationServiceTest {
         ElderActivationTicketMapper activationMapper = mock(ElderActivationTicketMapper.class);
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
-        ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper, activationMapper, policy);
+        ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper, activationMapper, policy,
+                mock(WorkOrderService.class));
         ElderCreateDTO dto = new ElderCreateDTO();
         dto.setName("测试老人");
         dto.setAddress("测试地址");
@@ -147,7 +149,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         ElderCreateDTO dto = new ElderCreateDTO();
         dto.setName("测试老人");
         dto.setAddress("测试地址");
@@ -170,7 +172,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         UserContext.set(new CurrentUser("10", "13800000010", "STAFF",
                 List.of("COMMUNITY_ADMIN"), "COMMUNITY_ADMIN", "2"));
         Page<ElderProfile> dbPage = new Page<>(3, 10);
@@ -198,7 +200,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         when(elderMapper.selectById(77L)).thenReturn(elderProfile(77L, 3L));
         UserContext.set(new CurrentUser("10", "13800000010", "STAFF",
                 List.of("COMMUNITY_ADMIN"), "COMMUNITY_ADMIN", "2"));

@@ -77,6 +77,11 @@ $script:checks = [ordered]@{
     '老人将今日一条未确认药盒任务打卡为 CONFIRMED' = '未执行'
     '有效子女账号读回 elderId=1 的绑定关系' = '未执行'
     '子女创建唯一未来预约并读回待确认状态' = '未执行'
+    '原申请人取消待确认预约后状态变为 CANCELLED 且没有派生工单' = '未执行'
+    '已确认未接单预约进入取消审批队列并由管理员通过后联动终止工单' = '未执行'
+    '管理员拒绝预约取消后预约和待派工单继续有效' = '未执行'
+    '已接单预约中止申请获批后预约/工单终止且原因与履约进度可追溯' = '未执行'
+    '员工角色撤销生成待交接历史且原工单责任/状态/进度保留' = '未执行'
     '管理员待确认列表包含本次创建的预约' = '未执行'
     '管理员通过 Web Cookie 与 CSRF 确认预约并生成工单' = '未执行'
     '读回预约为 CONFIRMED，关联工单为 PENDING_DISPATCH' = '未执行'
@@ -124,6 +129,10 @@ function Confirm-Chain([string]$Name, [bool]$Condition, [string]$FailureMessage)
     }
     $script:checks[$Name] = '失败'
     throw $FailureMessage
+}
+
+function ConvertTo-Utf8Hex([string]$Value) {
+    return [BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($Value)).Replace('-', '')
 }
 
 function ConvertTo-CommandLineArgument([string]$Argument) {
@@ -434,9 +443,17 @@ SET @syshttp_family_elder_id = COALESCE((SELECT elder_id FROM elder_profile WHER
 DELETE FROM work_order_action_history WHERE work_order_id IN ($orderIdList);
 DELETE FROM work_order_assignment_history WHERE work_order_id IN ($orderIdList);
 DELETE FROM work_order_handoff WHERE work_order_id IN ($orderIdList);
+DELETE FROM sos_event WHERE initial_work_order_id IN ($orderIdList);
+DELETE FROM service_stop_request WHERE reservation_id IN
+  (SELECT reservation_id FROM service_reservation WHERE elder_id = @syshttp_family_elder_id);
+DELETE FROM reservation_cancel_request WHERE reservation_id IN
+  (SELECT reservation_id FROM service_reservation WHERE elder_id = @syshttp_family_elder_id);
+DELETE FROM reservation_execution_link WHERE reservation_id IN
+  (SELECT reservation_id FROM service_reservation WHERE elder_id = @syshttp_family_elder_id);
 DELETE FROM audit_log WHERE target_type = 'WORK_ORDER'
   AND target_id IN (SELECT CAST(work_order_id AS CHAR) FROM work_order WHERE work_order_id IN ($orderIdList));
 DELETE FROM work_order WHERE work_order_id IN ($orderIdList);
+DELETE FROM service_reservation WHERE elder_id = @syshttp_family_elder_id;
 DELETE FROM elder_family_link WHERE child_user_id = @syshttp_family_user_id OR elder_id = @syshttp_family_elder_id;
 DELETE FROM elder_identity_link WHERE user_id = @syshttp_family_user_id OR elder_id = @syshttp_family_elder_id;
 DELETE FROM elder_activation_ticket WHERE ticket_id = '$ticketId' OR elder_id = @syshttp_family_elder_id;
@@ -451,12 +468,13 @@ SELECT CONCAT_WS('|',
     (SELECT COUNT(*) FROM sys_user WHERE phone_normalized IN ('$staffPhone', '$crossStaffPhone', '$familyPhone')),
     (SELECT COUNT(*) FROM elder_profile WHERE archive_no = '$familyArchiveNo' OR archive_no = 'SYSHTTP-COMM2-ELDER'),
     (SELECT COUNT(*) FROM elder_activation_ticket WHERE ticket_id = '$ticketId'),
-    (SELECT COUNT(*) FROM work_order WHERE work_order_id IN ($orderIdList))
+    (SELECT COUNT(*) FROM work_order WHERE work_order_id IN ($orderIdList)),
+    (SELECT COUNT(*) FROM service_reservation WHERE elder_id = @syshttp_family_elder_id)
 );
 "@
         $result = Invoke-AppDatabaseQuery $sql
         if ($result.ExitCode -ne 0) { return $false }
-        return [string]$result.StdOut.Trim() -eq '0|0|0|0'
+        return [string]$result.StdOut.Trim() -eq '0|0|0|0|0'
     } catch {
         return $false
     }
@@ -645,7 +663,19 @@ function Invoke-PhotoUpload(
 }
 
 function Assert-OkApiResponse([object]$Response, [string]$Description, [int]$ExpectedStatus = 200) {
-    if ($Response.StatusCode -ne $ExpectedStatus) { throw "$Description returned an unexpected HTTP status." }
+    if ($Response.StatusCode -ne $ExpectedStatus) {
+        $errorCode = 'unknown'
+        $errorMessage = 'no application message'
+        try {
+            $errorJson = ConvertFrom-Json -InputObject $Response.Content
+            if ($errorJson.code) { $errorCode = [string]$errorJson.code }
+            if ($errorJson.message) {
+                $errorMessage = ([string]$errorJson.message -replace '[\r\n]+', ' ').Trim()
+                if ($errorMessage.Length -gt 160) { $errorMessage = $errorMessage.Substring(0, 160) }
+            }
+        } catch { }
+        throw "$Description expected HTTP $ExpectedStatus, received $($Response.StatusCode) (code=$errorCode; message=$errorMessage)."
+    }
     try { $json = ConvertFrom-Json -InputObject $Response.Content }
     catch { throw "$Description returned invalid JSON." }
     if ($json.code -ne 'OK') { throw "$Description returned a non-OK application result." }
@@ -1090,7 +1120,10 @@ VALUES (@syshttp_cross_staff_id, 'COMMUNITY_ADMIN', 2, 'ACTIVE', 1, NOW(3));
         } elseif ($account.Label -match '已激活老人') {
             $elderAccount = [pscustomobject]@{ Token = [string]$loginJson.data.token }
         } elseif ($account.Label -match '子女\s*1') {
-            $childAccount = [pscustomobject]@{ Token = [string]$loginJson.data.token }
+            $childAccount = [pscustomobject]@{
+                Token = [string]$loginJson.data.token
+                UserId = [long]$loginJson.data.userId
+            }
         } elseif ($account.Label -match '子女\s*2') {
             $pendingChildAccount = [pscustomobject]@{
                 Token = [string]$loginJson.data.token
@@ -1650,6 +1683,179 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
             @($careExecutionJson.data.photoUrls | Where-Object { $_ -eq $carePhotoUrl }).Count -eq 1) `
         'The care worker execution result did not persist the uploaded evidence and pending-review status.'
 
+    $familyHandoffWorkOrderId = New-SyntheticWorkOrder -Status 'PROCESSING' `
+        -AssigneeId $staffTargetUserId -ElderId $script:syntheticFamilyElderId -CommunityId 1
+    $familyArchiveBeforeHandoffFacts = Get-IsolatedTestSideEffectSnapshot
+    $familyArchiveBeforeHandoffState = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', row_version) FROM elder_profile WHERE elder_id = $($script:syntheticFamilyElderId);
+"@
+    $familyArchiveBeforeHandoff = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/elder/archives/$($script:syntheticFamilyElderId)/status" -CsrfToken $adminAccount.Csrf `
+        -Body @{ status = 'INACTIVE'; reason = '交接前停档应拒绝' }
+    $familyArchiveAfterHandoffFacts = Get-IsolatedTestSideEffectSnapshot
+    $familyArchiveAfterHandoffState = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', row_version) FROM elder_profile WHERE elder_id = $($script:syntheticFamilyElderId);
+"@
+    Confirm-Chain '有未结工单且尚未完成接手时拒绝停用档案且无副作用' `
+        ($familyArchiveBeforeHandoff.StatusCode -ge 400 -and $familyArchiveBeforeHandoff.StatusCode -lt 500 -and
+            $familyArchiveBeforeHandoffFacts -eq $familyArchiveAfterHandoffFacts -and
+            $familyArchiveBeforeHandoffState.ExitCode -eq 0 -and $familyArchiveAfterHandoffState.ExitCode -eq 0 -and
+            $familyArchiveBeforeHandoffState.StdOut.Trim() -eq $familyArchiveAfterHandoffState.StdOut.Trim() -and
+            $familyArchiveAfterHandoffState.StdOut.Trim() -match '^ACTIVE\|') `
+        ("Archive deactivation was not rejected before handoff without mutation (status=$($familyArchiveBeforeHandoff.StatusCode), before=$($familyArchiveBeforeHandoffState.StdOut.Trim()), after=$($familyArchiveAfterHandoffState.StdOut.Trim()), factsEqual=$($familyArchiveBeforeHandoffFacts -eq $familyArchiveAfterHandoffFacts)).")
+
+    $handoffBefore = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', COALESCE(current_assignee_id, ''), '|', COALESCE(service_result_summary, ''))
+  FROM work_order WHERE work_order_id = $careWorkOrderId;
+"@
+    $roleRevocationReason = '隔离 HTTP 角色撤销交接验收'
+    $roleRevocationReasonHex = ConvertTo-Utf8Hex $roleRevocationReason
+    $careRoleRevocation = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-CARE-OFFBOARD-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @(); reason = $roleRevocationReason }
+    $null = Assert-OkApiResponse $careRoleRevocation 'Administrator care-worker role revocation with open work'
+    $handoffAfter = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', COALESCE(current_assignee_id, ''), '|', COALESCE(service_result_summary, ''))
+  FROM work_order WHERE work_order_id = $careWorkOrderId;
+"@
+    $handoffState = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(COUNT(*), '|', COALESCE(MAX(status), ''), '|', COALESCE(MAX(from_user_id), ''), '|',
+              COALESCE(MAX(to_user_id), 'NULL'), '|', HEX(COALESCE(MAX(handoff_reason), '')))
+  FROM work_order_handoff
+ WHERE work_order_id = $careWorkOrderId AND status = 'REASSIGNMENT_REQUIRED';
+"@
+    $handoffActionCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_action_history
+ WHERE work_order_id = $careWorkOrderId AND action_name = 'HANDOFF_REQUIRED';
+"@
+    $handoffAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'WORK_ORDER' AND target_id = '$careWorkOrderId' AND action = 'WORK_ORDER_HANDOFF_REQUIRED';
+"@
+    $handoffNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'WORK_ORDER' AND source_entity_id = '$careWorkOrderId'
+   AND event_type = 'WORK_ORDER_HANDOFF_REQUIRED'
+   AND dedup_key = CONCAT('WORK_ORDER_HANDOFF_REQUIRED:',
+       (SELECT MAX(handoff_id) FROM work_order_handoff
+         WHERE work_order_id = $careWorkOrderId AND status = 'REASSIGNMENT_REQUIRED'));
+"@
+    $oldCareFacts = Get-IsolatedBusinessFacts
+    $revokedWorkerWrite = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/start" `
+        -BearerToken $careToken -Client $careHttpContext.Client `
+        -IdempotencyKey ('SYSHTTP-REVOKED-CARE-START-' + [Guid]::NewGuid().ToString('N'))
+    $oldCareFactsAfter = Get-IsolatedBusinessFacts
+    $handoffDiagnostic = "before=[$($handoffBefore.ExitCode):$($handoffBefore.StdOut.Trim())]; after=[$($handoffAfter.ExitCode):$($handoffAfter.StdOut.Trim())]; handoff=[$($handoffState.ExitCode):$($handoffState.StdOut.Trim())]; action=[$($handoffActionCount.ExitCode):$($handoffActionCount.StdOut.Trim())]; audit=[$($handoffAuditCount.ExitCode):$($handoffAuditCount.StdOut.Trim())]; notification=[$($handoffNotificationCount.ExitCode):$($handoffNotificationCount.StdOut.Trim())]; revokedWriteStatus=$($revokedWorkerWrite.StatusCode); factsUnchanged=$($oldCareFacts -eq $oldCareFactsAfter)"
+    Confirm-Chain '员工角色撤销生成待交接历史且原工单责任/状态/进度保留' `
+        ($handoffBefore.ExitCode -eq 0 -and $handoffAfter.ExitCode -eq 0 -and
+            $handoffBefore.StdOut.Trim() -eq $handoffAfter.StdOut.Trim() -and
+            $handoffBefore.StdOut.Trim() -match '^PENDING_RESULT_REVIEW\|' -and
+            $handoffState.ExitCode -eq 0 -and
+            $handoffState.StdOut.Trim() -eq "1|REASSIGNMENT_REQUIRED|$staffTargetUserId|NULL|$roleRevocationReasonHex" -and
+            $handoffActionCount.ExitCode -eq 0 -and $handoffActionCount.StdOut.Trim() -eq '1' -and
+            $handoffAuditCount.ExitCode -eq 0 -and $handoffAuditCount.StdOut.Trim() -eq '1' -and
+            $handoffNotificationCount.ExitCode -eq 0 -and $handoffNotificationCount.StdOut.Trim() -eq '1' -and
+            $revokedWorkerWrite.StatusCode -eq 401 -and $oldCareFacts -eq $oldCareFactsAfter) `
+        "Role revocation did not create one pending handoff while preserving work-order progress and rejecting the old worker session without writes. $handoffDiagnostic"
+
+    $handoffRequestKey = 'SYSHTTP-HANDOFF-REQUEST-' + [Guid]::NewGuid().ToString('N')
+    $handoffRequestBody = @{ toUserId = $workerAccount.UserId; reason = '隔离 HTTP 验证管理员交接申请' }
+    $handoffRequestResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/handoffs" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $handoffRequestKey -Body $handoffRequestBody
+    $handoffRequestJson = Assert-OkApiResponse $handoffRequestResponse 'Administrator handoff request'
+    $handoffId = [long]$handoffRequestJson.data
+    $handoffRequestReplay = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/handoffs" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $handoffRequestKey -Body $handoffRequestBody
+    $handoffAcceptResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$careWorkOrderId/handoffs/$handoffId/accept" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-HANDOFF-ACCEPT-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ responseComment = '隔离目标工作人员确认接手' }
+    $null = Assert-OkApiResponse $handoffAcceptResponse 'Target worker accepts handoff'
+    $handoffFinal = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', COALESCE(current_assignee_id, ''), '|', COALESCE(service_result_summary, ''))
+  FROM work_order WHERE work_order_id = $careWorkOrderId;
+"@
+    $handoffAcceptedRow = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(status, '|', COALESCE(to_user_id, ''), '|', responded_at IS NOT NULL)
+  FROM work_order_handoff WHERE handoff_id = $handoffId AND work_order_id = $careWorkOrderId;
+"@
+    $handoffAcceptedActionCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_action_history
+ WHERE work_order_id = $careWorkOrderId AND action_name = 'HANDOFF_ACCEPTED';
+"@
+    $handoffRequestActionCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_action_history
+ WHERE work_order_id = $careWorkOrderId AND action_name = 'HANDOFF_REQUESTED';
+"@
+    $handoffAssignmentCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_assignment_history
+ WHERE work_order_id = $careWorkOrderId AND action_type = 'HANDOFF'
+   AND assigned_to_user_id = $($workerAccount.UserId);
+"@
+    $handoffLifecycleAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'WORK_ORDER' AND target_id = '$careWorkOrderId'
+   AND action IN ('WORK_ORDER_HANDOFF_REQUESTED', 'WORK_ORDER_HANDOFF_ACCEPT');
+"@
+    $handoffLifecycleNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'WORK_ORDER' AND source_entity_id = '$careWorkOrderId'
+   AND dedup_key IN ('WORK_ORDER_HANDOFF_REQUESTED:$handoffId', 'WORK_ORDER_HANDOFF_ACCEPTED:$handoffId');
+"@
+    $handoffRequestFirstJson = try { ConvertFrom-Json -InputObject $handoffRequestResponse.Content } catch { $null }
+    $handoffRequestReplayJson = try { ConvertFrom-Json -InputObject $handoffRequestReplay.Content } catch { $null }
+    $handoffBeforeParts = $handoffBefore.StdOut.Trim() -split '\|', 3
+    $handoffFinalParts = $handoffFinal.StdOut.Trim() -split '\|', 3
+    $handoffReplayMatches = ($handoffRequestReplay.StatusCode -eq $handoffRequestResponse.StatusCode -and
+        $handoffRequestReplay.Content -ceq $handoffRequestResponse.Content)
+    $handoffLifecycleDiagnostic = "handoffId=$handoffId; before=[$($handoffBefore.StdOut.Trim())]; final=[$($handoffFinal.StdOut.Trim())]; accepted=[$($handoffAcceptedRow.StdOut.Trim())]; requestReplay=$handoffReplayMatches; actions=$($handoffRequestActionCount.StdOut.Trim())/$($handoffAcceptedActionCount.StdOut.Trim()); assignments=$($handoffAssignmentCount.StdOut.Trim()); audit=$($handoffLifecycleAuditCount.StdOut.Trim()); notifications=$($handoffLifecycleNotificationCount.StdOut.Trim())"
+    Confirm-Chain '撤权遗留交接可由管理员指定目标、目标接收且保留状态和履约结果' `
+        ($handoffId -gt 0 -and $handoffRequestJson -and $handoffRequestReplayJson -and $handoffReplayMatches -and
+            $handoffBeforeParts.Count -eq 3 -and $handoffFinalParts.Count -eq 3 -and
+            $handoffFinalParts[0] -eq 'PENDING_RESULT_REVIEW' -and
+            $handoffFinalParts[1] -eq [string]$workerAccount.UserId -and
+            $handoffFinalParts[2] -eq $handoffBeforeParts[2] -and
+            $handoffAcceptedRow.ExitCode -eq 0 -and
+            $handoffAcceptedRow.StdOut.Trim() -eq "ACCEPTED|$($workerAccount.UserId)|1" -and
+            $handoffRequestActionCount.ExitCode -eq 0 -and $handoffRequestActionCount.StdOut.Trim() -eq '1' -and
+            $handoffAcceptedActionCount.ExitCode -eq 0 -and $handoffAcceptedActionCount.StdOut.Trim() -eq '1' -and
+            $handoffAssignmentCount.ExitCode -eq 0 -and $handoffAssignmentCount.StdOut.Trim() -eq '1' -and
+            $handoffLifecycleAuditCount.ExitCode -eq 0 -and $handoffLifecycleAuditCount.StdOut.Trim() -eq '2' -and
+            $handoffLifecycleNotificationCount.ExitCode -eq 0 -and $handoffLifecycleNotificationCount.StdOut.Trim() -eq '2') `
+        "Administrator/target handoff lifecycle did not preserve execution fields or create exactly one action, assignment, audit, and notification per transition. $handoffLifecycleDiagnostic"
+
+    $familyHandoffRequestResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$familyHandoffWorkOrderId/handoffs" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-ARCHIVE-HANDOFF-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ toUserId = $workerAccount.UserId; reason = '停档前将未结工单交给有效网格员' }
+    $familyHandoffRequestJson = Assert-OkApiResponse $familyHandoffRequestResponse 'Request handoff before elder archive deactivation'
+    $familyHandoffId = [long]$familyHandoffRequestJson.data
+    $familyHandoffAcceptResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$familyHandoffWorkOrderId/handoffs/$familyHandoffId/accept" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-ARCHIVE-HANDOFF-ACCEPT-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ responseComment = '停档前确认接手' }
+    $null = Assert-OkApiResponse $familyHandoffAcceptResponse 'Accept work-order handoff before elder archive deactivation'
+    $familyHandoffAcceptedState = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(w.status, '|', COALESCE(w.current_assignee_id, ''), '|', h.status, '|', h.to_user_id)
+  FROM work_order w JOIN work_order_handoff h ON h.work_order_id = w.work_order_id
+ WHERE w.work_order_id = $familyHandoffWorkOrderId AND h.handoff_id = $familyHandoffId;
+"@
+    Confirm-Chain '停档门槛通过真实交接 API 记录目标接手' `
+        ($familyHandoffAcceptedState.ExitCode -eq 0 -and
+            $familyHandoffAcceptedState.StdOut.Trim() -eq "PROCESSING|$($workerAccount.UserId)|ACCEPTED|$($workerAccount.UserId)") `
+        'The synthetic elder work order did not retain PROCESSING after its target accepted responsibility.'
+
+    # Later Task 2 session checks reuse this synthetic employee account.
+    # Restore its role after proving revocation so those independent checks can log in.
+    $careRoleRestore = Invoke-Api -Method 'PUT' -Path "/api/v1/admin/staff/$staffTargetUserId/roles" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-CARE-ROLE-RESTORE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ roles = @('CARE_WORKER'); reason = '隔离 HTTP 后续验收夹具恢复' }
+    $null = Assert-OkApiResponse $careRoleRestore 'Restore synthetic care-worker role for later isolated session checks'
+    $careRolesRestored = @((Get-ActiveStaffRoles -UserId $staffTargetUserId) -split ',' | Where-Object { $_ })
+    Confirm-Chain '交接验收后恢复后续认证链使用的合成员工角色' `
+        ($careRolesRestored.Count -eq 1 -and $careRolesRestored[0] -eq 'CARE_WORKER') `
+        'Could not restore the synthetic care-worker role for later isolated session checks.'
+
     $webUnsafePath = '/api/v1/admin/reservations/0/confirm'
     $missingCsrfResponse = Invoke-Api -Method 'POST' -Path $webUnsafePath
     Confirm-Chain 'Web Cookie 写请求缺少 CSRF Token 时返回 HTTP 403' ($missingCsrfResponse.StatusCode -eq 403) `
@@ -1894,6 +2100,65 @@ SELECT GROUP_CONCAT(CONCAT(operation_scope, ':', record_state, ':', response_sta
     $serviceDate = $dateBase.AddDays((Get-Random -Minimum 30 -Maximum 366)).ToString('yyyy-MM-dd')
     $slotCode = if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) { 'MORNING' } else { 'AFTERNOON' }
     $address = if ($elderProfileJson.data.address) { [string]$elderProfileJson.data.address } else { '隔离环境系统冒烟地址' }
+
+    $inactiveReservationBody = @{
+        elderId = $script:syntheticFamilyElderId
+        serviceType = [string]$selectedCatalog.serviceType
+        serviceDate = $dateBase.AddDays(6).ToString('yyyy-MM-dd')
+        slotCode = $slotCode
+        serviceAddress = '隔离环境停用档案预约负例'
+        specialNotes = 'inactive-elder-gate-' + [Guid]::NewGuid().ToString('N')
+    }
+    $inactiveReservationCreate = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $familyToken -IdempotencyKey ('SYSHTTP-INACTIVE-RESERVATION-CREATE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $inactiveReservationBody
+    $inactiveReservationCreateJson = Assert-OkApiResponse $inactiveReservationCreate 'Create pending reservation before archive deactivation' 200
+    $inactiveReservationId = [long]$inactiveReservationCreateJson.data
+    $inactiveElderDeactivate = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/elder/archives/$($script:syntheticFamilyElderId)/status" -CsrfToken $adminAccount.Csrf `
+        -Body @{ status = 'INACTIVE'; reason = '隔离环境验证停用后禁止普通预约' }
+    $null = Assert-OkApiResponse $inactiveElderDeactivate 'Deactivate isolated elder profile'
+    $inactiveGateFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $inactiveReservationBefore = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', COUNT(l.work_order_id), '|', COUNT(w.work_order_id))
+FROM service_reservation r
+LEFT JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+LEFT JOIN work_order w ON w.work_order_id = l.work_order_id
+WHERE r.reservation_id = $inactiveReservationId
+GROUP BY r.status;
+"@
+    $inactiveConfirmResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/$inactiveReservationId/confirm" -CsrfToken $adminAccount.Csrf
+    $inactiveNewReservationBody = $inactiveReservationBody.Clone()
+    $inactiveNewReservationBody.specialNotes = [string]$inactiveNewReservationBody.specialNotes + '-after-inactive'
+    $inactiveNewReservation = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $familyToken -Body $inactiveNewReservationBody
+    $inactiveGateFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $inactiveReservationAfter = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', COUNT(l.work_order_id), '|', COUNT(w.work_order_id))
+FROM service_reservation r
+LEFT JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+LEFT JOIN work_order w ON w.work_order_id = l.work_order_id
+WHERE r.reservation_id = $inactiveReservationId
+GROUP BY r.status;
+"@
+    $inactiveReservationCount = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(COUNT(*), '|', SUM(special_notes = '$($inactiveReservationBody.specialNotes)'), '|', SUM(special_notes = '$($inactiveNewReservationBody.specialNotes)'))
+FROM service_reservation WHERE elder_id = $($script:syntheticFamilyElderId);
+"@
+    Confirm-Chain '停用档案后既有待确认预约不能转工单，新预约被拒且无副作用' `
+        ($inactiveReservationId -gt 0 -and $inactiveConfirmResponse.StatusCode -ge 400 -and
+            $inactiveConfirmResponse.StatusCode -lt 500 -and $inactiveNewReservation.StatusCode -ge 400 -and
+            $inactiveNewReservation.StatusCode -lt 500 -and $inactiveGateFactsBefore -eq $inactiveGateFactsAfter -and
+            $inactiveReservationBefore.ExitCode -eq 0 -and $inactiveReservationAfter.ExitCode -eq 0 -and
+            $inactiveReservationBefore.StdOut.Trim() -eq 'PENDING_CONFIRMATION|0|0' -and
+            $inactiveReservationAfter.StdOut.Trim() -eq $inactiveReservationBefore.StdOut.Trim() -and
+            $inactiveReservationCount.ExitCode -eq 0 -and $inactiveReservationCount.StdOut.Trim() -eq '1|1|0') `
+        ("Inactive elder reservation gate failed (confirm={0}, create={1}, factsEqual={2}, before={3}, after={4}, rows={5})." -f `
+            $inactiveConfirmResponse.StatusCode, $inactiveNewReservation.StatusCode,
+            ($inactiveGateFactsBefore -eq $inactiveGateFactsAfter), $inactiveReservationBefore.StdOut.Trim(),
+            $inactiveReservationAfter.StdOut.Trim(), $inactiveReservationCount.StdOut.Trim())
+
     $reservationIdempotencyKey = 'SYSHTTP-RESERVATION-' + [Guid]::NewGuid().ToString('N')
     $reservationSpecialNotes = 'system-http-smoke-' + [Guid]::NewGuid().ToString('N')
     $reservationBody = @{
@@ -2044,6 +2309,343 @@ SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body)
             [string]$closedOrderJson.data.sourceType -eq 'RESERVATION') `
         'GET /api/v1/service-reservations/{id} did not read back COMPLETED with its CLOSED reservation work order.'
 
+    $pendingCancelBody = @{
+        elderId = 1
+        serviceType = [string]$selectedCatalog.serviceType
+        serviceDate = $dateBase.AddDays(2).ToString('yyyy-MM-dd')
+        slotCode = 'AFTERNOON'
+        serviceAddress = $address
+        specialNotes = 'system-http-pending-cancel-' + [Guid]::NewGuid().ToString('N')
+    }
+    $pendingCancelCreate = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-PENDING-CANCEL-CREATE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $pendingCancelBody
+    $pendingCancelCreateJson = Assert-OkApiResponse $pendingCancelCreate 'Create reservation for direct pending cancellation'
+    $pendingCancelId = [long]$pendingCancelCreateJson.data
+    $pendingCancelResponse = Invoke-Api -Method 'POST' -Path "/api/v1/service-reservations/$pendingCancelId/cancel" `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-PENDING-CANCEL-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ reason = '隔离 HTTP 取消待确认预约验收' }
+    $null = Assert-OkApiResponse $pendingCancelResponse 'Cancel pending reservation as original applicant'
+    $pendingCancelRead = Invoke-Api -Method 'GET' -Path "/api/v1/service-reservations/$pendingCancelId" `
+        -BearerToken $childAccount.Token
+    $pendingCancelReadJson = Assert-OkApiResponse $pendingCancelRead 'Pending cancellation reservation readback'
+    $pendingCancelFacts = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', COUNT(l.link_id))
+  FROM service_reservation r
+  LEFT JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+ WHERE r.reservation_id = $pendingCancelId
+ GROUP BY r.reservation_id, r.status;
+"@
+    Confirm-Chain '原申请人取消待确认预约后状态变为 CANCELLED 且没有派生工单' `
+        ([string]$pendingCancelReadJson.data.status -eq 'CANCELLED' -and
+            $pendingCancelFacts.ExitCode -eq 0 -and $pendingCancelFacts.StdOut.Trim() -eq 'CANCELLED|0') `
+        'The original applicant could not cancel a pending reservation without creating an execution work order.'
+
+    $sameSlotRebook = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-CANCELLED-SLOT-REBOOK-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $pendingCancelBody
+    $sameSlotRebookJson = Assert-OkApiResponse $sameSlotRebook 'Rebook a slot after pending reservation cancellation'
+    $sameSlotRebookRead = Invoke-Api -Method 'GET' `
+        -Path "/api/v1/service-reservations/$([long]$sameSlotRebookJson.data)" -BearerToken $childAccount.Token
+    $sameSlotRebookReadJson = Assert-OkApiResponse $sameSlotRebookRead 'Read back same-slot rebooking'
+    Confirm-Chain '待确认预约取消后同老人同服务时段可重新预约' `
+        ([long]$sameSlotRebookJson.data -gt 0 -and
+            [long]$sameSlotRebookJson.data -ne $pendingCancelId -and
+            [string]$sameSlotRebookReadJson.data.status -eq 'PENDING_CONFIRMATION') `
+        'A cancelled reservation continued to occupy its elder/service/date/slot key.'
+
+    $approvedCancelBody = @{
+        elderId = 1
+        serviceType = [string]$selectedCatalog.serviceType
+        serviceDate = $dateBase.AddDays(3).ToString('yyyy-MM-dd')
+        slotCode = 'MORNING'
+        serviceAddress = $address
+        specialNotes = 'system-http-approved-cancel-' + [Guid]::NewGuid().ToString('N')
+    }
+    $approvedCancelCreate = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-APPROVED-CANCEL-CREATE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $approvedCancelBody
+    $approvedCancelCreateJson = Assert-OkApiResponse $approvedCancelCreate 'Create reservation for approved cancellation'
+    $approvedCancelReservationId = [long]$approvedCancelCreateJson.data
+    $approvedCancelConfirm = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/$approvedCancelReservationId/confirm" -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-APPROVED-CANCEL-CONFIRM-' + [Guid]::NewGuid().ToString('N'))
+    $approvedCancelConfirmJson = Assert-OkApiResponse $approvedCancelConfirm 'Confirm reservation for approved cancellation'
+    $approvedCancelWorkOrderId = [long]$approvedCancelConfirmJson.data
+    $approvedCancelRequestReason = '隔离 HTTP 已确认预约取消申请'
+    $approvedCancelRequestKey = 'SYSHTTP-APPROVED-CANCEL-REQUEST-' + [Guid]::NewGuid().ToString('N')
+    $approvedCancelRequest = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/service-reservations/$approvedCancelReservationId/cancel" `
+        -BearerToken $childAccount.Token -IdempotencyKey $approvedCancelRequestKey `
+        -Body @{ reason = $approvedCancelRequestReason }
+    $null = Assert-OkApiResponse $approvedCancelRequest 'Submit confirmed reservation cancellation request'
+    $approvedCancelRequestReplay = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/service-reservations/$approvedCancelReservationId/cancel" `
+        -BearerToken $childAccount.Token -IdempotencyKey $approvedCancelRequestKey `
+        -Body @{ reason = $approvedCancelRequestReason }
+    $cancelRequestReplayMatches = $approvedCancelRequestReplay.StatusCode -eq $approvedCancelRequest.StatusCode -and
+        $approvedCancelRequestReplay.Content -ceq $approvedCancelRequest.Content
+    $cancelQueueResponse = Invoke-Api -Method 'GET' -Path '/api/v1/admin/reservations/cancel-requests/pending'
+    $cancelQueueJson = Assert-OkApiResponse $cancelQueueResponse 'Administrator pending cancellation queue'
+    $approvedCancelQueueItem = @($cancelQueueJson.data | Where-Object {
+        [string]$_.reservationId -eq [string]$approvedCancelReservationId
+    })
+    $approvedCancelId = if ($approvedCancelQueueItem.Count -eq 1) { [long]$approvedCancelQueueItem[0].cancelId } else { 0L }
+    $approvedCancelReviewReason = '隔离 HTTP 管理员通过取消验收'
+    $approvedCancelReviewReasonHex = ConvertTo-Utf8Hex $approvedCancelReviewReason
+    $approvedCancelReviewBody = @{ decision = 'APPROVE'; reviewReason = $approvedCancelReviewReason }
+    $approvedCancelReviewKey = 'SYSHTTP-APPROVED-CANCEL-REVIEW-' + [Guid]::NewGuid().ToString('N')
+    $approvedCancelReview = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/cancel-requests/$approvedCancelId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $approvedCancelReviewKey `
+        -Body $approvedCancelReviewBody
+    $null = Assert-OkApiResponse $approvedCancelReview 'Approve confirmed reservation cancellation'
+    $approvedCancelReviewReplay = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/cancel-requests/$approvedCancelId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $approvedCancelReviewKey `
+        -Body $approvedCancelReviewBody
+    $approvedCancelReviewReplayMatches = $approvedCancelReviewReplay.StatusCode -eq $approvedCancelReview.StatusCode -and
+        $approvedCancelReviewReplay.Content -ceq $approvedCancelReview.Content
+    $approvedCancelIdempotencyConflict = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/cancel-requests/$approvedCancelId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $approvedCancelReviewKey `
+        -Body @{ decision = 'REJECT'; reviewReason = '与原审批内容不同' }
+    $approvedCancelRead = Invoke-Api -Method 'GET' `
+        -Path "/api/v1/service-reservations/$approvedCancelReservationId" -BearerToken $childAccount.Token
+    $approvedCancelReadJson = Assert-OkApiResponse $approvedCancelRead 'Approved reservation cancellation readback'
+    $approvedCancelSql = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', w.status, '|', c.status, '|', c.applicant_user_id, '|',
+              COALESCE(c.reviewer_user_id, ''), '|', IF(c.reviewed_at IS NULL, 'NO_TIME', 'HAS_TIME'), '|',
+              HEX(COALESCE(c.review_reason, '')))
+  FROM service_reservation r
+  JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+  JOIN work_order w ON w.work_order_id = l.work_order_id
+  JOIN reservation_cancel_request c ON c.reservation_id = r.reservation_id
+ WHERE r.reservation_id = $approvedCancelReservationId AND c.cancel_id = $approvedCancelId;
+"@
+    $approvedCancelAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'SERVICE_RESERVATION' AND target_id = '$approvedCancelReservationId'
+   AND action = 'REVIEW_RESERVATION_CANCELLATION';
+"@
+    $approvedWorkOrderAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'WORK_ORDER' AND target_id = '$approvedCancelWorkOrderId'
+   AND action = 'WORK_ORDER_TERMINATE_PRE_ACCEPTANCE';
+"@
+    $approvedCancelNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'WORK_ORDER' AND source_entity_id = '$approvedCancelWorkOrderId'
+   AND event_type = 'WORK_ORDER_TERMINATED_PRE_ACCEPTANCE'
+   AND dedup_key = 'WORK_ORDER_TERMINATED_PRE_ACCEPTANCE:$approvedCancelWorkOrderId';
+"@
+    $approvedCancelDiagnostic = "cancelId=$approvedCancelId; queueCount=$($approvedCancelQueueItem.Count); queueStatus=$([string]$approvedCancelQueueItem[0].workOrderStatus); reservationStatus=$([string]$approvedCancelReadJson.data.status); orderStatus=$([string]$approvedCancelReadJson.data.associatedWorkOrderStatus); requestReplayMatches=$cancelRequestReplayMatches; reviewReplayMatches=$approvedCancelReviewReplayMatches; idempotencyConflictStatus=$($approvedCancelIdempotencyConflict.StatusCode); sql=[$($approvedCancelSql.ExitCode):$($approvedCancelSql.StdOut.Trim())]; audit=[$($approvedCancelAuditCount.ExitCode):$($approvedCancelAuditCount.StdOut.Trim())]; orderAudit=[$($approvedWorkOrderAuditCount.ExitCode):$($approvedWorkOrderAuditCount.StdOut.Trim())]; notification=[$($approvedCancelNotificationCount.ExitCode):$($approvedCancelNotificationCount.StdOut.Trim())]"
+    Confirm-Chain '已确认未接单预约进入取消审批队列并由管理员通过后联动终止工单' `
+        ($approvedCancelId -gt 0 -and $approvedCancelQueueItem.Count -eq 1 -and
+            [string]$approvedCancelQueueItem[0].workOrderStatus -in @('PENDING_DISPATCH', 'DISPATCHED') -and
+            $cancelRequestReplayMatches -and $approvedCancelReviewReplayMatches -and
+            $approvedCancelIdempotencyConflict.StatusCode -eq 409 -and
+            [string]$approvedCancelReadJson.data.status -eq 'CANCELLED' -and
+            [string]$approvedCancelReadJson.data.associatedWorkOrderStatus -eq 'TERMINATED_PRE_ACCEPTANCE' -and
+            $approvedCancelSql.ExitCode -eq 0 -and
+            $approvedCancelSql.StdOut.Trim() -eq "CANCELLED|TERMINATED_PRE_ACCEPTANCE|APPROVED|$($childAccount.UserId)|$($adminAccount.UserId)|HAS_TIME|$approvedCancelReviewReasonHex" -and
+            $approvedCancelAuditCount.ExitCode -eq 0 -and $approvedCancelAuditCount.StdOut.Trim() -eq '1' -and
+            $approvedWorkOrderAuditCount.ExitCode -eq 0 -and $approvedWorkOrderAuditCount.StdOut.Trim() -eq '1' -and
+            $approvedCancelNotificationCount.ExitCode -eq 0 -and $approvedCancelNotificationCount.StdOut.Trim() -eq '1') `
+        "Approved cancellation did not atomically cancel the reservation, terminate its not-yet-accepted work order, persist applicant/reviewer/time/reason, and create one matching audit/notification. $approvedCancelDiagnostic"
+
+    $rejectedCancelBody = @{
+        elderId = 1
+        serviceType = [string]$selectedCatalog.serviceType
+        serviceDate = $dateBase.AddDays(4).ToString('yyyy-MM-dd')
+        slotCode = 'AFTERNOON'
+        serviceAddress = $address
+        specialNotes = 'system-http-rejected-cancel-' + [Guid]::NewGuid().ToString('N')
+    }
+    $rejectedCancelCreate = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-REJECTED-CANCEL-CREATE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $rejectedCancelBody
+    $rejectedCancelCreateJson = Assert-OkApiResponse $rejectedCancelCreate 'Create reservation for rejected cancellation'
+    $rejectedCancelReservationId = [long]$rejectedCancelCreateJson.data
+    $rejectedCancelConfirm = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/$rejectedCancelReservationId/confirm" -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-REJECTED-CANCEL-CONFIRM-' + [Guid]::NewGuid().ToString('N'))
+    $rejectedCancelConfirmJson = Assert-OkApiResponse $rejectedCancelConfirm 'Confirm reservation for rejected cancellation'
+    $rejectedCancelWorkOrderId = [long]$rejectedCancelConfirmJson.data
+    $rejectedCancelRequestReason = '隔离 HTTP 管理员拒绝取消验收'
+    $rejectedCancelRequest = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/service-reservations/$rejectedCancelReservationId/cancel" `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-REJECTED-CANCEL-REQUEST-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ reason = $rejectedCancelRequestReason }
+    $null = Assert-OkApiResponse $rejectedCancelRequest 'Submit reservation cancellation request for rejection'
+    $rejectedCancelQueueResponse = Invoke-Api -Method 'GET' -Path '/api/v1/admin/reservations/cancel-requests/pending'
+    $rejectedCancelQueueJson = Assert-OkApiResponse $rejectedCancelQueueResponse 'Read pending cancellation before rejection'
+    $rejectedCancelQueueItem = @($rejectedCancelQueueJson.data | Where-Object {
+        [string]$_.reservationId -eq [string]$rejectedCancelReservationId
+    })
+    $rejectedCancelId = if ($rejectedCancelQueueItem.Count -eq 1) { [long]$rejectedCancelQueueItem[0].cancelId } else { 0L }
+    $rejectedCancelReviewReason = '隔离 HTTP 暂不符合取消条件'
+    $rejectedCancelReviewReasonHex = ConvertTo-Utf8Hex $rejectedCancelReviewReason
+    $rejectedCancelReview = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/cancel-requests/$rejectedCancelId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-REJECTED-CANCEL-REVIEW-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ decision = 'REJECT'; reviewReason = $rejectedCancelReviewReason }
+    $null = Assert-OkApiResponse $rejectedCancelReview 'Reject confirmed reservation cancellation'
+    $rejectedCancelRead = Invoke-Api -Method 'GET' `
+        -Path "/api/v1/service-reservations/$rejectedCancelReservationId" -BearerToken $childAccount.Token
+    $rejectedCancelReadJson = Assert-OkApiResponse $rejectedCancelRead 'Rejected reservation cancellation readback'
+    $rejectedCancelSql = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', w.status, '|', c.status, '|', COALESCE(c.reviewer_user_id, ''), '|',
+              IF(c.reviewed_at IS NULL, 'NO_TIME', 'HAS_TIME'), '|', HEX(COALESCE(c.review_reason, '')))
+  FROM service_reservation r
+  JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+  JOIN work_order w ON w.work_order_id = l.work_order_id
+  JOIN reservation_cancel_request c ON c.reservation_id = r.reservation_id
+ WHERE r.reservation_id = $rejectedCancelReservationId AND c.cancel_id = $rejectedCancelId;
+"@
+    $rejectedCancelAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'SERVICE_RESERVATION' AND target_id = '$rejectedCancelReservationId'
+   AND action = 'REVIEW_RESERVATION_CANCELLATION';
+"@
+    $rejectedCancelNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'SERVICE_RESERVATION' AND source_entity_id = '$rejectedCancelReservationId'
+   AND event_type = 'RESERVATION_CANCEL_REJECTED'
+   AND dedup_key = 'RESERVATION_CANCEL_REJECTED:$rejectedCancelId';
+"@
+    $rejectedCancelDiagnostic = "cancelId=$rejectedCancelId; queueCount=$($rejectedCancelQueueItem.Count); reservationStatus=$([string]$rejectedCancelReadJson.data.status); orderStatus=$([string]$rejectedCancelReadJson.data.associatedWorkOrderStatus); sql=[$($rejectedCancelSql.ExitCode):$($rejectedCancelSql.StdOut.Trim())]; audit=[$($rejectedCancelAuditCount.ExitCode):$($rejectedCancelAuditCount.StdOut.Trim())]; notification=[$($rejectedCancelNotificationCount.ExitCode):$($rejectedCancelNotificationCount.StdOut.Trim())]"
+    Confirm-Chain '管理员拒绝预约取消后预约和待派工单继续有效' `
+        ($rejectedCancelId -gt 0 -and $rejectedCancelQueueItem.Count -eq 1 -and
+            [string]$rejectedCancelReadJson.data.status -eq 'CONFIRMED' -and
+            [string]$rejectedCancelReadJson.data.associatedWorkOrderStatus -eq 'PENDING_DISPATCH' -and
+            $rejectedCancelSql.ExitCode -eq 0 -and
+            $rejectedCancelSql.StdOut.Trim() -eq "CONFIRMED|PENDING_DISPATCH|REJECTED|$($adminAccount.UserId)|HAS_TIME|$rejectedCancelReviewReasonHex" -and
+            $rejectedCancelAuditCount.ExitCode -eq 0 -and $rejectedCancelAuditCount.StdOut.Trim() -eq '1' -and
+            $rejectedCancelNotificationCount.ExitCode -eq 0 -and $rejectedCancelNotificationCount.StdOut.Trim() -eq '1') `
+        "A rejected reservation cancellation did not preserve the confirmed reservation and dispatchable work order with reviewer/time/reason and one matching audit/notification. $rejectedCancelDiagnostic"
+
+    $stopReservationBody = @{
+        elderId = 1
+        serviceType = [string]$selectedCatalog.serviceType
+        serviceDate = $dateBase.AddDays(5).ToString('yyyy-MM-dd')
+        slotCode = 'MORNING'
+        serviceAddress = $address
+        specialNotes = 'system-http-service-stop-' + [Guid]::NewGuid().ToString('N')
+    }
+    $stopReservationCreate = Invoke-Api -Method 'POST' -Path '/api/v1/service-reservations' `
+        -BearerToken $childAccount.Token -IdempotencyKey ('SYSHTTP-STOP-CREATE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body $stopReservationBody
+    $stopReservationCreateJson = Assert-OkApiResponse $stopReservationCreate 'Create reservation for service-stop approval'
+    $stopReservationId = [long]$stopReservationCreateJson.data
+    $stopReservationConfirm = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/admin/reservations/$stopReservationId/confirm" -CsrfToken $adminAccount.Csrf `
+        -IdempotencyKey ('SYSHTTP-STOP-CONFIRM-' + [Guid]::NewGuid().ToString('N'))
+    $stopReservationConfirmJson = Assert-OkApiResponse $stopReservationConfirm 'Confirm reservation for service-stop approval'
+    $stopWorkOrderId = [long]$stopReservationConfirmJson.data
+    $stopDispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$stopWorkOrderId/dispatch" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-STOP-DISPATCH-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ assigneeUserId = $workerAccount.UserId; reason = '隔离 HTTP 服务中止测试派单' }
+    $null = Assert-OkApiResponse $stopDispatchResponse 'Dispatch reservation work order for service-stop test'
+    $stopAcceptResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$stopWorkOrderId/accept" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-STOP-ACCEPT-' + [Guid]::NewGuid().ToString('N'))
+    $null = Assert-OkApiResponse $stopAcceptResponse 'Accept reservation work order for service-stop test'
+    $stopStartResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$stopWorkOrderId/start" `
+        -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-STOP-START-' + [Guid]::NewGuid().ToString('N'))
+    $null = Assert-OkApiResponse $stopStartResponse 'Start reservation work order for service-stop test'
+    $stopRequestBody = @{
+        stopReason = '隔离 HTTP 老人临时身体不适'
+        completedContent = '已完成入户安全检查'
+        incompleteContent = '尚未完成浴室防滑处理'
+        followUpPlan = '待家属确认就医安排后重新预约'
+    }
+    $stopRequestKey = 'SYSHTTP-STOP-REQUEST-' + [Guid]::NewGuid().ToString('N')
+    $stopRequestResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$stopWorkOrderId/service-stop-requests" `
+        -BearerToken $childAccount.Token -IdempotencyKey $stopRequestKey -Body $stopRequestBody
+    $stopRequestJson = Assert-OkApiResponse $stopRequestResponse 'Original reservation applicant service-stop request'
+    $stopRequestId = [long]$stopRequestJson.data
+    $stopRequestReplay = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$stopWorkOrderId/service-stop-requests" `
+        -BearerToken $childAccount.Token -IdempotencyKey $stopRequestKey -Body $stopRequestBody
+    Confirm-Chain '服务中止申请同键重放返回原状态码与正文' `
+        ($stopRequestReplay.StatusCode -eq $stopRequestResponse.StatusCode -and
+            $stopRequestReplay.Content -ceq $stopRequestResponse.Content) `
+        'The service-stop request retry did not replay the original response exactly.'
+    $stopRequestsResponse = Invoke-Api -Method 'GET' `
+        -Path "/api/v1/work-orders/$stopWorkOrderId/service-stop-requests"
+    $stopRequestsJson = Assert-OkApiResponse $stopRequestsResponse 'Administrator service-stop requests readback'
+    $stopRequestItem = @($stopRequestsJson.data | Where-Object { [long]$_.stopId -eq $stopRequestId })
+    $stopReviewKey = 'SYSHTTP-STOP-REVIEW-' + [Guid]::NewGuid().ToString('N')
+    $stopReviewComment = '隔离 HTTP 管理员批准服务中止'
+    $stopReviewCommentHex = ConvertTo-Utf8Hex $stopReviewComment
+    $stopReviewBody = @{ action = 'APPROVE'; reviewComment = $stopReviewComment }
+    $stopReviewResponse = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$stopWorkOrderId/service-stop-requests/$stopRequestId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $stopReviewKey -Body $stopReviewBody
+    $null = Assert-OkApiResponse $stopReviewResponse 'Administrator service-stop approval'
+    $stopReviewReplay = Invoke-Api -Method 'POST' `
+        -Path "/api/v1/work-orders/$stopWorkOrderId/service-stop-requests/$stopRequestId/review" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey $stopReviewKey -Body $stopReviewBody
+    $stopReadResponse = Invoke-Api -Method 'GET' -Path "/api/v1/service-reservations/$stopReservationId" `
+        -BearerToken $childAccount.Token
+    $stopReadJson = Assert-OkApiResponse $stopReadResponse 'Service-stop reservation readback'
+    $stopStateSql = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(r.status, '|', w.status, '|', s.status, '|', s.applicant_user_id, '|',
+              COALESCE(s.reviewer_user_id, ''), '|', COALESCE(s.executor_user_id, ''), '|',
+              IF(s.reviewed_at IS NULL, 'NO_REVIEW_TIME', 'HAS_REVIEW_TIME'), '|',
+              IF(s.executed_at IS NULL, 'NO_EXECUTION_TIME', 'HAS_EXECUTION_TIME'), '|',
+              HEX(COALESCE(s.stop_reason, '')), '|', HEX(COALESCE(s.completed_content, '')), '|',
+              HEX(COALESCE(s.incomplete_content, '')), '|', HEX(COALESCE(s.follow_up_plan, '')), '|',
+              HEX(COALESCE(s.review_comment, '')))
+  FROM service_reservation r
+  JOIN reservation_execution_link l ON l.reservation_id = r.reservation_id
+  JOIN work_order w ON w.work_order_id = l.work_order_id
+  JOIN service_stop_request s ON s.reservation_id = r.reservation_id
+ WHERE r.reservation_id = $stopReservationId AND l.work_order_id = $stopWorkOrderId AND s.stop_id = $stopRequestId;
+"@
+    $stopActionCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM work_order_action_history
+ WHERE work_order_id = $stopWorkOrderId AND action_name = 'SERVICE_STOPPED';
+"@
+    $stopAuditCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM audit_log
+ WHERE target_type = 'WORK_ORDER' AND target_id = '$stopWorkOrderId'
+   AND action = 'WORK_ORDER_SERVICE_STOP_APPROVE';
+"@
+    $stopRequestNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'WORK_ORDER' AND source_entity_id = '$stopWorkOrderId'
+   AND dedup_key = 'WORK_ORDER_STOP_REQUESTED:$stopRequestId';
+"@
+    $stopApprovedNotificationCount = Invoke-AppDatabaseQuery @"
+SELECT COUNT(*) FROM notification_event
+ WHERE source_entity_type = 'WORK_ORDER' AND source_entity_id = '$stopWorkOrderId'
+   AND dedup_key = 'WORK_ORDER_STOPPED:$stopRequestId';
+"@
+    $stopReasonHex = ConvertTo-Utf8Hex ([string]$stopRequestBody.stopReason)
+    $stopCompletedContentHex = ConvertTo-Utf8Hex ([string]$stopRequestBody.completedContent)
+    $stopIncompleteContentHex = ConvertTo-Utf8Hex ([string]$stopRequestBody.incompleteContent)
+    $stopFollowUpPlanHex = ConvertTo-Utf8Hex ([string]$stopRequestBody.followUpPlan)
+    $stopDiagnostic = "stopId=$stopRequestId; requestCount=$($stopRequestItem.Count); reservationStatus=$([string]$stopReadJson.data.status); orderStatus=$([string]$stopReadJson.data.associatedWorkOrderStatus); sql=[$($stopStateSql.ExitCode):$($stopStateSql.StdOut.Trim())]; action=[$($stopActionCount.ExitCode):$($stopActionCount.StdOut.Trim())]; audit=[$($stopAuditCount.ExitCode):$($stopAuditCount.StdOut.Trim())]; requestNotification=[$($stopRequestNotificationCount.ExitCode):$($stopRequestNotificationCount.StdOut.Trim())]; approvedNotification=[$($stopApprovedNotificationCount.ExitCode):$($stopApprovedNotificationCount.StdOut.Trim())]"
+    Confirm-Chain '已接单预约中止申请获批后预约/工单终止且原因与履约进度可追溯' `
+        ($stopRequestId -gt 0 -and $stopRequestItem.Count -eq 1 -and
+            [string]$stopRequestItem[0].stopReason -eq [string]$stopRequestBody.stopReason -and
+            [string]$stopRequestItem[0].completedContent -eq [string]$stopRequestBody.completedContent -and
+            [string]$stopRequestItem[0].incompleteContent -eq [string]$stopRequestBody.incompleteContent -and
+            [string]$stopRequestItem[0].followUpPlan -eq [string]$stopRequestBody.followUpPlan -and
+            $stopReviewReplay.StatusCode -eq $stopReviewResponse.StatusCode -and
+            $stopReviewReplay.Content -ceq $stopReviewResponse.Content -and
+            [string]$stopReadJson.data.status -eq 'SERVICE_STOPPED' -and
+            [string]$stopReadJson.data.associatedWorkOrderStatus -eq 'SERVICE_STOPPED' -and
+            $stopStateSql.ExitCode -eq 0 -and
+            $stopStateSql.StdOut.Trim() -eq "SERVICE_STOPPED|SERVICE_STOPPED|APPROVED|$($childAccount.UserId)|$($adminAccount.UserId)|$($adminAccount.UserId)|HAS_REVIEW_TIME|HAS_EXECUTION_TIME|$stopReasonHex|$stopCompletedContentHex|$stopIncompleteContentHex|$stopFollowUpPlanHex|$stopReviewCommentHex" -and
+            $stopActionCount.ExitCode -eq 0 -and $stopActionCount.StdOut.Trim() -eq '1' -and
+            $stopAuditCount.ExitCode -eq 0 -and $stopAuditCount.StdOut.Trim() -eq '1' -and
+            $stopRequestNotificationCount.ExitCode -eq 0 -and $stopRequestNotificationCount.StdOut.Trim() -eq '1' -and
+            $stopApprovedNotificationCount.ExitCode -eq 0 -and $stopApprovedNotificationCount.StdOut.Trim() -eq '1') `
+        "Approved service stop did not preserve the submitted details, move both linked business records to SERVICE_STOPPED, and keep audit/history/notifications single and consistent after replay. $stopDiagnostic"
+
     $sosIdempotencyKey = 'SYSHTTP-SOS-' + [Guid]::NewGuid().ToString('N')
     $sosTriggerResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' `
         -BearerToken $elderAccount.Token -IdempotencyKey $sosIdempotencyKey -Body @{
@@ -2053,8 +2655,10 @@ SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body)
     $sosTriggerJson = Assert-OkApiResponse $sosTriggerResponse 'Elder SOS trigger'
     $sosId = [long]$sosTriggerJson.data.sosId
     $sosWorkOrderId = [long]$sosTriggerJson.data.workOrderId
+    [void]$script:syntheticWorkOrderIds.Add($sosWorkOrderId)
     Confirm-Chain '老人触发 SOS 并原子生成求助工单' `
-        ($sosId -gt 0 -and $sosWorkOrderId -gt 0 -and [string]$sosTriggerJson.data.status -eq 'ACCEPTED') `
+        ($sosId -gt 0 -and $sosWorkOrderId -gt 0 -and [string]$sosTriggerJson.data.status -eq 'ACCEPTED' -and
+            $sosTriggerJson.data.elderInactiveAtAcceptance -eq $false) `
         'POST /api/v1/emergency/sos/trigger did not return an accepted SOS and generated emergency work order.'
 
     $sosDispatchResponse = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$sosId/dispatch" `
@@ -2076,8 +2680,52 @@ SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body)
     $sosOrderReadJson = Assert-OkApiResponse $sosOrderReadResponse 'Closed SOS work-order readback'
     Confirm-Chain '管理员派发并处置 SOS 后求助与工单均 CLOSED' `
         ($closedSos.Count -eq 1 -and [string]$closedSos[0].workOrderId -eq [string]$sosWorkOrderId -and
+            $closedSos[0].elderInactiveAtAcceptance -eq $false -and
             [string]$sosOrderReadJson.data.status -eq 'CLOSED' -and [string]$sosOrderReadJson.data.sourceType -eq 'SOS') `
         'POST /api/v1/emergency/sos/{id}/dispatch or /close did not leave both the SOS and generated work order closed.'
+
+    $familySwitchForInactiveSos = Invoke-Api -Method 'POST' -Path '/api/v1/auth/switch-role' `
+        -BearerToken $familyToken -Client $familyClientContext.Client -Body @{ targetRoleCode = 'ELDER' }
+    $familySwitchForInactiveSosJson = Assert-OkApiResponse $familySwitchForInactiveSos 'Switch synthetic family account to ELDER for inactive SOS exception'
+    $inactiveSosResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' `
+        -BearerToken $familyToken -Client $familyClientContext.Client `
+        -IdempotencyKey ('SYSHTTP-INACTIVE-SOS-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            elderId = $script:syntheticFamilyElderId
+            pressDurationMs = 2500
+            locationAddress = '隔离环境停用老人 SOS 地址'
+        }
+    $inactiveSosJson = Assert-OkApiResponse $inactiveSosResponse 'Inactive elder SOS exception trigger'
+    $inactiveSosId = [long]$inactiveSosJson.data.sosId
+    $inactiveSosWorkOrderId = [long]$inactiveSosJson.data.workOrderId
+    [void]$script:syntheticWorkOrderIds.Add($inactiveSosWorkOrderId)
+    $inactiveSosMarkerSql = Invoke-AppDatabaseQuery @"
+SELECT CONCAT(elder_inactive_at_acceptance, '|', status)
+  FROM sos_event WHERE sos_id = $inactiveSosId AND elder_id = $($script:syntheticFamilyElderId)
+    AND initial_work_order_id = $inactiveSosWorkOrderId;
+"@
+    $inactiveSosAdminList = Invoke-Api -Method 'GET' -Path '/api/v1/emergency/sos/list?status=ACCEPTED'
+    $inactiveSosAdminListJson = Assert-OkApiResponse $inactiveSosAdminList 'Administrator inactive SOS review list'
+    $inactiveSosAdminItem = @($inactiveSosAdminListJson.data | Where-Object { [string]$_.sosId -eq [string]$inactiveSosId })
+    Confirm-Chain '停用档案仍可触发 SOS，事件持久标记且管理员列表可见' `
+        ([string]$familySwitchForInactiveSosJson.data.activeRole -eq 'ELDER' -and
+            $inactiveSosId -gt 0 -and $inactiveSosWorkOrderId -gt 0 -and
+            [string]$inactiveSosJson.data.status -eq 'ACCEPTED' -and
+            $inactiveSosJson.data.elderInactiveAtAcceptance -eq $true -and
+            $inactiveSosMarkerSql.ExitCode -eq 0 -and $inactiveSosMarkerSql.StdOut.Trim() -eq '1|ACCEPTED' -and
+            $inactiveSosAdminItem.Count -eq 1 -and $inactiveSosAdminItem[0].elderInactiveAtAcceptance -eq $true) `
+        ("Inactive SOS was not accepted and marked for admin review (sos=$inactiveSosId, marker=$($inactiveSosMarkerSql.StdOut.Trim()), adminMatches=$($inactiveSosAdminItem.Count)).")
+    $inactiveSosDispatch = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$inactiveSosId/dispatch" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-INACTIVE-SOS-DISPATCH-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            assigneeId = $workerAccount.UserId
+            dispatchReason = '隔离环境处理停用档案 SOS'
+        }
+    $null = Assert-OkApiResponse $inactiveSosDispatch 'Dispatch inactive elder SOS exception'
+    $inactiveSosClose = Invoke-Api -Method 'POST' -Path "/api/v1/emergency/sos/$inactiveSosId/close" `
+        -CsrfToken $adminAccount.Csrf -IdempotencyKey ('SYSHTTP-INACTIVE-SOS-CLOSE-' + [Guid]::NewGuid().ToString('N')) -Body @{
+            resultSummary = '隔离环境已核实停用老人安全并完成现场处置。'
+            isFalseAlarm = $false
+        }
+    $null = Assert-OkApiResponse $inactiveSosClose 'Close inactive elder SOS exception fixture'
 
     $sosCancelTriggerResponse = Invoke-Api -Method 'POST' -Path '/api/v1/emergency/sos/trigger' `
         -BearerToken $elderAccount.Token -IdempotencyKey ('SYSHTTP-SOS-CANCEL-TRIGGER-' + [Guid]::NewGuid().ToString('N')) -Body @{
@@ -2087,6 +2735,7 @@ SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body)
     $sosCancelTriggerJson = Assert-OkApiResponse $sosCancelTriggerResponse 'Elder SOS trigger for cancellation replay'
     $sosCancelId = [long]$sosCancelTriggerJson.data.sosId
     $sosCancelWorkOrderId = [long]$sosCancelTriggerJson.data.workOrderId
+    [void]$script:syntheticWorkOrderIds.Add($sosCancelWorkOrderId)
     Confirm-Chain '取消重放夹具已生成 SOS 与关联工单' `
         ($sosCancelId -gt 0 -and $sosCancelWorkOrderId -gt 0 -and [string]$sosCancelTriggerJson.data.status -eq 'ACCEPTED') `
         'The isolated cancellation replay fixture did not create an accepted SOS and its work order.'

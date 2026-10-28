@@ -5,8 +5,11 @@ import cn.communityelderly.common.idempotency.Idempotency;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.common.security.UserContext;
+import cn.communityelderly.modules.reservation.dto.ReservationCancelReviewDTO;
+import cn.communityelderly.modules.reservation.dto.ReservationCancelRequestVO;
 import cn.communityelderly.modules.reservation.dto.ReservationCancelDTO;
 import cn.communityelderly.modules.reservation.dto.ReservationVO;
+import cn.communityelderly.modules.reservation.service.ServiceReservationService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,9 +21,12 @@ import java.util.List;
 public class AdminReservationCoordinationController {
 
     private final ReservationWorkOrderCoordinator coordinator;
+    private final ServiceReservationService reservationService;
 
-    public AdminReservationCoordinationController(ReservationWorkOrderCoordinator coordinator) {
+    public AdminReservationCoordinationController(ReservationWorkOrderCoordinator coordinator,
+                                                  ServiceReservationService reservationService) {
         this.coordinator = coordinator;
+        this.reservationService = reservationService;
     }
 
     @GetMapping("/pending")
@@ -42,6 +48,20 @@ public class AdminReservationCoordinationController {
                                           @Valid @RequestBody ReservationCancelDTO dto) {
         CurrentUser user = UserContext.requireCurrentUser();
         coordinator.rejectReservation(reservationId, dto.getReason(), Long.parseLong(user.getUserId()));
+        return Result.success();
+    }
+
+    @GetMapping("/cancel-requests/pending")
+    public Result<List<ReservationCancelRequestVO>> listPendingCancellationRequests() {
+        return Result.success(reservationService.listPendingCancellationRequests());
+    }
+
+    @PostMapping("/cancel-requests/{cancelId}/review")
+    @Idempotency(required = true)
+    public Result<Void> reviewCancellationRequest(@PathVariable Long cancelId,
+                                                  @Valid @RequestBody ReservationCancelReviewDTO dto) {
+        CurrentUser user = UserContext.requireCurrentUser();
+        reservationService.reviewCancellationRequest(cancelId, dto, Long.parseLong(user.getUserId()));
         return Result.success();
     }
 }

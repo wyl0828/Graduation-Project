@@ -19,11 +19,15 @@ import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.emergency.entity.WorkOrder;
 import cn.communityelderly.modules.emergency.entity.WorkOrderActionHistory;
 import cn.communityelderly.modules.emergency.entity.WorkOrderAssignmentHistory;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderHandoffMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderActionHistoryMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderAssignmentHistoryMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderMapper;
+import cn.communityelderly.modules.notification.service.NotificationService;
 import cn.communityelderly.modules.order.dto.WorkOrderDispatchDTO;
 import cn.communityelderly.modules.order.dto.WorkOrderReviewDTO;
+import cn.communityelderly.modules.order.mapper.ServiceStopRequestMapper;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import cn.communityelderly.modules.order.service.impl.WorkOrderServiceImpl;
 import cn.communityelderly.modules.reservation.entity.ReservationCancelRequest;
 import cn.communityelderly.modules.reservation.entity.ReservationExecutionLink;
@@ -36,11 +40,14 @@ import cn.communityelderly.modules.reservation.mapper.ServiceReservationMapper;
 import cn.communityelderly.modules.reservation.service.ServiceReservationService;
 import cn.communityelderly.modules.reservation.service.impl.ServiceReservationServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.time.Clock;
+import java.time.ZoneId;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -84,7 +91,7 @@ class WorkOrderReservationAuthorizationTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
         ServiceReservation reservation = reservation(102L, 2L, 44L, "PENDING_CONFIRMATION");
-        when(reservationMapper.selectById(102L)).thenReturn(reservation);
+        when(reservationMapper.selectByIdForUpdate(102L)).thenReturn(reservation);
         when(elderMapper.selectById(2L)).thenReturn(elder(2L, 1L));
         ElderFamilyLink activeLink = new ElderFamilyLink();
         activeLink.setElderId(2L);
@@ -117,12 +124,13 @@ class WorkOrderReservationAuthorizationTest {
         catalog.setServiceType("DAILY_CARE");
         catalog.setStatus("ACTIVE");
         when(catalogMapper.selectOne(any(Wrapper.class))).thenReturn(catalog);
-        when(reservationMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper, identityMapper, familyMapper);
         ServiceReservationServiceImpl service = new ServiceReservationServiceImpl(
                 reservationMapper, catalogMapper, mock(ReservationExecutionLinkMapper.class),
                 mock(ReservationCancelRequestMapper.class), elderMapper, familyMapper, identityMapper,
-                mock(WorkOrderMapper.class), mock(UserAccountMapper.class), policy);
+                mock(WorkOrderMapper.class), mock(UserAccountMapper.class), policy,
+                mock(WorkOrderService.class), mock(AuditLogService.class), mock(NotificationService.class),
+                new ObjectMapper(), Clock.system(ZoneId.of("Asia/Shanghai")));
         UserContext.set(user("31", "ELDER", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
@@ -140,13 +148,15 @@ class WorkOrderReservationAuthorizationTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderIdentityLinkMapper identityMapper = mock(ElderIdentityLinkMapper.class);
         ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
-        when(reservationMapper.selectById(105L)).thenReturn(reservation(105L, 2L, 44L, "PENDING_CONFIRMATION"));
+        when(reservationMapper.selectByIdForUpdate(105L)).thenReturn(reservation(105L, 2L, 44L, "PENDING_CONFIRMATION"));
         when(elderMapper.selectById(2L)).thenReturn(elder(2L, 1L));
         when(identityMapper.selectOne(any(Wrapper.class))).thenReturn(identity(31L, 2L));
         ServiceReservationServiceImpl service = new ServiceReservationServiceImpl(
                 reservationMapper, null, null, cancelMapper, elderMapper, familyMapper, identityMapper,
                 mock(WorkOrderMapper.class), mock(UserAccountMapper.class),
-                new ObjectAuthorizationPolicy(elderMapper, identityMapper, familyMapper));
+                new ObjectAuthorizationPolicy(elderMapper, identityMapper, familyMapper),
+                mock(WorkOrderService.class), mock(AuditLogService.class), mock(NotificationService.class),
+                new ObjectMapper(), Clock.system(ZoneId.of("Asia/Shanghai")));
         UserContext.set(user("31", "ELDER", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
@@ -170,7 +180,8 @@ class WorkOrderReservationAuthorizationTest {
         ReservationWorkOrderCoordinator coordinator = new ReservationWorkOrderCoordinator(
                 reservationMapper, linkMapper, orderMapper, historyMapper, elderMapper, service,
                 new ObjectAuthorizationPolicy(elderMapper, mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)),
-                mock(cn.communityelderly.modules.audit.service.AuditLogService.class));
+                mock(cn.communityelderly.modules.audit.service.AuditLogService.class),
+                Clock.system(ZoneId.of("Asia/Shanghai")));
         UserContext.set(user("20", "GRID_WORKER", "1"));
 
         BusinessException error = assertThrows(BusinessException.class, coordinator::getPendingReservations);
@@ -194,7 +205,7 @@ class WorkOrderReservationAuthorizationTest {
         ReservationWorkOrderCoordinator coordinator = new ReservationWorkOrderCoordinator(
                 reservationMapper, linkMapper, orderMapper, historyMapper, elderMapper, service,
                 new ObjectAuthorizationPolicy(elderMapper, mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)),
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), Clock.system(ZoneId.of("Asia/Shanghai")));
         UserContext.set(user("10", "COMMUNITY_ADMIN", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
@@ -222,7 +233,7 @@ class WorkOrderReservationAuthorizationTest {
         ReservationWorkOrderCoordinator coordinator = new ReservationWorkOrderCoordinator(
                 reservationMapper, linkMapper, orderMapper, historyMapper, elderMapper, service,
                 new ObjectAuthorizationPolicy(elderMapper, mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)),
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), Clock.system(ZoneId.of("Asia/Shanghai")));
         UserContext.set(user("10", "COMMUNITY_ADMIN", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
@@ -385,7 +396,9 @@ class WorkOrderReservationAuthorizationTest {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), familyMapper);
         return new ServiceReservationServiceImpl(reservationMapper, null, null, cancelMapper, elderMapper, familyMapper,
-                mock(ElderIdentityLinkMapper.class), mock(WorkOrderMapper.class), mock(UserAccountMapper.class), policy);
+                mock(ElderIdentityLinkMapper.class), mock(WorkOrderMapper.class), mock(UserAccountMapper.class), policy,
+                mock(WorkOrderService.class), mock(AuditLogService.class), mock(NotificationService.class),
+                new ObjectMapper(), Clock.system(ZoneId.of("Asia/Shanghai")));
     }
 
     private WorkOrderServiceImpl workOrderService(WorkOrderMapper orderMapper,
@@ -405,9 +418,11 @@ class WorkOrderReservationAuthorizationTest {
                                                   UserRoleMapper roleMapper) {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
-        return new WorkOrderServiceImpl(orderMapper, assignmentMapper, actionMapper, elderMapper, userMapper, roleMapper,
-                mock(ReservationExecutionLinkMapper.class), mock(ServiceReservationMapper.class), policy,
-                mock(AuditLogService.class));
+        return new WorkOrderServiceImpl(orderMapper, assignmentMapper, actionMapper,
+                mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
+                elderMapper, userMapper, roleMapper, mock(ReservationExecutionLinkMapper.class),
+                mock(ServiceReservationMapper.class), policy, mock(AuditLogService.class),
+                mock(NotificationService.class), new ObjectMapper(), Clock.system(ZoneId.of("Asia/Shanghai")));
     }
 
     private static CurrentUser user(String userId, String role, String communityId) {
