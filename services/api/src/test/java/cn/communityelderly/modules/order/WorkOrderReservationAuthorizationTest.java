@@ -321,6 +321,7 @@ class WorkOrderReservationAuthorizationTest {
         UserAccountMapper userMapper = mock(UserAccountMapper.class);
         WorkOrder order = workOrder(204L, 2L, 1L, 66L, "PENDING_RESULT_REVIEW");
         when(orderMapper.selectById(204L)).thenReturn(order);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(order);
         when(elderMapper.selectById(2L)).thenReturn(elder(2L, 1L));
         WorkOrderServiceImpl service = workOrderService(orderMapper, assignmentMapper, actionMapper, elderMapper, userMapper);
         UserContext.set(user("66", "COMMUNITY_ADMIN", "1"));
@@ -422,7 +423,7 @@ class WorkOrderReservationAuthorizationTest {
                 mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
                 elderMapper, userMapper, roleMapper, mock(ReservationExecutionLinkMapper.class),
                 mock(ServiceReservationMapper.class), policy, mock(AuditLogService.class),
-                mock(NotificationService.class), new ObjectMapper(), Clock.system(ZoneId.of("Asia/Shanghai")));
+                mock(NotificationService.class), new ObjectMapper(), mock(cn.communityelderly.modules.order.service.FileEvidenceService.class), Clock.system(ZoneId.of("Asia/Shanghai")));
     }
 
     private static CurrentUser user(String userId, String role, String communityId) {

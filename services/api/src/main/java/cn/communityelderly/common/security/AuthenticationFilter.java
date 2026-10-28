@@ -87,7 +87,7 @@ public class AuthenticationFilter extends OncePerRequestFilter {
                     "/api/v1/auth/activate-elder",
                     "/api/v1/elder/activation/consume",
                     "/api/v1/service-catalogs" -> true;
-            default -> path.startsWith("/api/v1/files/view/");
+            default -> false;
         };
     }
 

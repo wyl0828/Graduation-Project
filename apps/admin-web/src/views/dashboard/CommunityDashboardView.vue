@@ -132,10 +132,13 @@
         <template #header>
           <div class="card-head-flex">
             <div>
-              <span class="card-head-title">📈 近 7 天助老工单走势与平均响应时长</span>
-              <span class="card-head-hint">（双轴指标：工单吞吐量 vs 响应速度）</span>
+              <span class="card-head-title">📈 近 7 天工单与首次接单响应</span>
             </div>
-            <el-tag size="small" type="info">平均响应：服务端按日统计</el-tag>
+            <el-select v-model="responseCategory" aria-label="响应统计工单类别" style="width: 130px">
+              <el-option label="全部工单" value="ALL" />
+              <el-option label="普通工单" value="ORDINARY" />
+              <el-option label="SOS 工单" value="SOS" />
+            </el-select>
           </div>
         </template>
         <div class="chart-visual">
@@ -144,6 +147,19 @@
             {{ chartStateMessage(hasTrendData, '工单走势') }}
           </div>
         </div>
+        <p class="response-description">按上海时间建单日统计首次有效接单响应；仍未接单数为截至当前的有效待接单工单。该指标代表社区接单响应。</p>
+        <table v-if="chartsStatus === 'success' || chartsStatus === 'empty'" class="response-table">
+          <caption>首次接单响应明细（无有效样本显示“无数据”）</caption>
+          <thead><tr><th>建单日期</th><th>已接单</th><th>仍未接单</th><th>平均首次接单响应</th></tr></thead>
+          <tbody>
+            <tr v-for="(date, index) in selectedResponseTrend?.dateList ?? []" :key="date">
+              <th scope="row">{{ date }}</th>
+              <td>{{ formatCount(selectedResponseTrend?.acceptedCounts?.[index]) }}</td>
+              <td>{{ formatCount(selectedResponseTrend?.unacceptedCounts?.[index]) }}</td>
+              <td>{{ formatResponseMinutes(selectedResponseTrend?.avgResponseMinutes?.[index]) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </el-card>
 
       <el-card class="chart-card flex-1" shadow="hover">
@@ -179,7 +195,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import {
   User,
@@ -205,6 +221,10 @@ const isFullscreen = ref(false)
 
 const summaryData = ref<DashboardSummaryVO | null>(null)
 const chartsData = ref<DashboardChartsVO | null>(null)
+const responseCategory = ref<'ALL' | 'ORDINARY' | 'SOS'>('ALL')
+const selectedResponseTrend = computed(() => responseCategory.value === 'ALL'
+  ? chartsData.value?.workOrderTrend
+  : chartsData.value?.workOrderTrendByCategory?.[responseCategory.value])
 const alertFeed = ref<RealtimeAlertFeedVO[]>([])
 const summaryStatus = ref<DashboardRequestState>('loading')
 const chartsStatus = ref<DashboardRequestState>('loading')
@@ -231,7 +251,7 @@ function hasPositiveCount(values: Array<number | null> | null | undefined): bool
 const hasDiseaseData = computed(() => hasPositiveCount(chartsData.value?.diseaseDistribution?.map(item => item.value)))
 const hasServiceData = computed(() => hasPositiveCount(chartsData.value?.serviceStructure?.map(item => item.orderCount)))
 const hasTrendData = computed(() => {
-  const trend = chartsData.value?.workOrderTrend
+  const trend = selectedResponseTrend.value
   return Boolean(
     trend?.dateList?.length &&
     (hasPositiveCount(trend.dispatchedCounts) || hasPositiveCount(trend.closedCounts)),
@@ -257,6 +277,12 @@ function formatCount(value: number | null | undefined): string | number {
 function formatPercent(value: number | null | undefined): string {
   return value == null ? '无数据' : `${value}%`
 }
+
+function formatResponseMinutes(value: number | null | undefined): string {
+  return value == null ? '无数据' : `${value} 分钟`
+}
+
+watch(responseCategory, () => updateCharts(chartsData.value))
 
 function getAlertTagType(value: RealtimeAlertFeedVO['tagType']): DashboardTagType {
   if (value === 'danger' || value === 'warning' || value === 'info') return value
@@ -373,7 +399,7 @@ function initCharts() {
         axisPointer: { type: 'cross', crossStyle: { color: '#999' } }
       },
       legend: {
-        data: ['受理派单数', '完工结案数', '平均响应时长(分)'],
+        data: ['建单数', '完工结案数', '平均首次接单响应(分)'],
         top: '2%',
         textStyle: { color: '#475569' }
       },
@@ -396,22 +422,18 @@ function initCharts() {
           type: 'value',
           name: '工单数量 (单)',
           min: 0,
-          max: 35,
-          interval: 7,
           axisLabel: { formatter: '{value}' }
         },
         {
           type: 'value',
           name: '响应用时 (分钟)',
           min: 0,
-          max: 40,
-          interval: 10,
           axisLabel: { formatter: '{value} min' }
         }
       ],
       series: [
         {
-          name: '受理派单数',
+          name: '建单数',
           type: 'bar',
           barWidth: 14,
           itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
@@ -425,7 +447,7 @@ function initCharts() {
           data: []
         },
         {
-          name: '平均响应时长(分)',
+          name: '平均首次接单响应(分)',
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
@@ -441,7 +463,7 @@ function initCharts() {
 function updateCharts(data: DashboardChartsVO | null) {
   const diseaseData = (data?.diseaseDistribution ?? []).map(item => ({ value: item.value, name: item.name || '未分类' }))
   const serviceData = (data?.serviceStructure ?? []).map(item => ({ value: item.orderCount, name: item.serviceName || '服务类型未提供' }))
-  const trend = data?.workOrderTrend
+  const trend = responseCategory.value === 'ALL' ? data?.workOrderTrend : data?.workOrderTrendByCategory?.[responseCategory.value]
 
   diseaseChart?.setOption({ series: [{ data: diseaseData }] })
   servicePieChart?.setOption({ series: [{ data: serviceData }] })
@@ -742,6 +764,31 @@ onUnmounted(() => {
 .chart-box-large {
   width: 100%;
   height: 320px;
+}
+
+.response-description {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.response-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: center;
+}
+
+.response-table caption {
+  padding: 8px;
+  text-align: left;
+  color: #475569;
+}
+
+.response-table th,
+.response-table td {
+  padding: 7px 4px;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 .chart-visual {

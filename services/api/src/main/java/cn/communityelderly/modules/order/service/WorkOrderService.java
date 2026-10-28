@@ -22,6 +22,8 @@ public interface WorkOrderService {
     void rejectOrder(Long workOrderId, String reason, Long workerUserId);
     void startService(Long workOrderId, Long workerUserId);
     void submitExecutionResult(Long workOrderId, WorkOrderExecutionDTO dto, Long workerUserId);
+    void assertCurrentMayUploadEvidence(Long workOrderId);
+    void assertCurrentMayReadEvidence(Long workOrderId);
     void assertCurrentCareWorkerMayUpload(Long workOrderId);
     void reviewWorkOrder(Long workOrderId, WorkOrderReviewDTO dto, Long reviewerId);
     Long requestServiceStop(Long workOrderId, ServiceStopRequestDTO dto, Long applicantUserId);

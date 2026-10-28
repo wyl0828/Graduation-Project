@@ -5,6 +5,8 @@ import cn.communityelderly.common.api.ErrorCode;
 import cn.communityelderly.common.exception.BusinessException;
 import cn.communityelderly.modules.auth.service.AuthService;
 import cn.communityelderly.modules.auth.service.impl.PhoneVerificationChallengeService;
+import cn.communityelderly.modules.dashboard.dto.DashboardChartsVO;
+import cn.communityelderly.modules.dashboard.dto.WorkOrder7DayTrendVO;
 import cn.communityelderly.modules.dashboard.service.CommunityDashboardService;
 import cn.communityelderly.modules.elder.service.ActivationCodeService;
 import cn.communityelderly.modules.elder.service.ElderArchiveService;
@@ -181,6 +183,43 @@ class HttpAuthenticationIntegrationTest {
                         .contentType(APPLICATION_JSON)
                         .content("{\"currentPassword\":\"synthetic-current-password\",\"newPassword\":\"synthetic-new-password-2026\"}"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    @DisplayName("已认证看板返回首次接单统计字段并拒绝跨社区 HTTP 查询")
+    void dashboardChartsExposeResponseMetricsAndEnforceCommunityScope() throws Exception {
+        CurrentUser user = new CurrentUser(
+                "42", "13000000042", "STAFF", java.util.List.of("COMMUNITY_ADMIN"),
+                "COMMUNITY_ADMIN", "1", 700L, "dashboard-session", "WEB");
+        when(sessionAuthenticationService.authenticate(eq("dashboard-session"), anyString())).thenReturn(user);
+
+        WorkOrder7DayTrendVO trend = new WorkOrder7DayTrendVO();
+        trend.setDateList(java.util.List.of("10-27"));
+        trend.setDispatchedCounts(java.util.List.of(3L));
+        trend.setClosedCounts(java.util.List.of(1L));
+        trend.setAvgResponseMinutes(java.util.Collections.singletonList(null));
+        trend.setAcceptedCounts(java.util.List.of(2L));
+        trend.setUnacceptedCounts(java.util.List.of(1L));
+        DashboardChartsVO charts = new DashboardChartsVO();
+        charts.setWorkOrderTrend(trend);
+        charts.setWorkOrderTrendByCategory(java.util.Map.of("ORDINARY", trend, "SOS", trend));
+        when(dashboardService.getCharts(1L, "7D")).thenReturn(charts);
+
+        mockMvc.perform(get("/api/v1/dashboard/community/charts")
+                        .queryParam("communityId", "1")
+                        .cookie(new jakarta.servlet.http.Cookie(AuthenticationFilter.SESSION_COOKIE_NAME, "dashboard-session")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.workOrderTrend.acceptedCounts[0]").value(2))
+                .andExpect(jsonPath("$.data.workOrderTrend.unacceptedCounts[0]").value(1))
+                .andExpect(jsonPath("$.data.workOrderTrend.avgResponseMinutes[0]").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.data.workOrderTrendByCategory.SOS.dateList[0]").value("10-27"));
+
+        mockMvc.perform(get("/api/v1/dashboard/community/charts")
+                        .queryParam("communityId", "2")
+                        .cookie(new jakarta.servlet.http.Cookie(AuthenticationFilter.SESSION_COOKIE_NAME, "dashboard-session")))
+                .andExpect(status().isForbidden());
+
+        verify(dashboardService).getCharts(1L, "7D");
     }
 
     @Test

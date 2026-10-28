@@ -1,5 +1,8 @@
 package cn.communityelderly.modules.dashboard;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import cn.communityelderly.common.api.PageResult;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.UserContext;
@@ -12,6 +15,12 @@ import cn.communityelderly.modules.dashboard.dto.DashboardChartsVO;
 import cn.communityelderly.modules.dashboard.dto.DashboardSummaryVO;
 import cn.communityelderly.modules.dashboard.dto.RealtimeAlertFeedVO;
 import cn.communityelderly.modules.dashboard.service.CommunityDashboardService;
+import cn.communityelderly.modules.elder.entity.ElderProfile;
+import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
+import cn.communityelderly.modules.emergency.entity.WorkOrder;
+import cn.communityelderly.modules.emergency.entity.WorkOrderActionHistory;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderActionHistoryMapper;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -22,6 +31,11 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.time.Clock;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -35,6 +49,21 @@ class DashboardAndAuditIntegrationTest {
 
     @Autowired
     private AuditLogService auditLogService;
+
+    @Autowired
+    private ElderProfileMapper elderProfileMapper;
+
+    @Autowired
+    private WorkOrderMapper workOrderMapper;
+
+    @Autowired
+    private WorkOrderActionHistoryMapper workOrderActionHistoryMapper;
+
+    @Autowired
+    private Clock applicationClock;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() {
@@ -80,6 +109,119 @@ class DashboardAndAuditIntegrationTest {
         assertTrue(alerts.size() >= 2, "预警流应包含告警事件记录");
         assertNotNull(alerts.get(0).getElderName(), "预警流首条记录必须包含长辈姓名");
         assertNotNull(alerts.get(0).getTagType(), "预警流标签类型必须有效");
+    }
+
+    @Test
+    @DisplayName("首次接单趋势使用数据库操作历史并按老人所属社区隔离，序列化保留普通与 SOS 分类")
+    void firstAcceptanceTrendUsesActionHistoryAndCommunityScope() throws Exception {
+        ElderProfile communityOneElder = findElderInCommunity(1L);
+        ElderProfile communityTwoElder = findElderInCommunity(2L);
+        LocalDate today = LocalDate.now(applicationClock);
+
+        DashboardChartsVO beforeCommunityOne = dashboardService.getCharts(1L, "7D");
+        DashboardChartsVO beforeCommunityTwo = dashboardService.getCharts(2L, "7D");
+        int ordinaryDayIndex = firstEmptyAcceptedDay(
+                beforeCommunityOne.getWorkOrderTrendByCategory().get("ORDINARY"));
+        int sosDayIndex = firstEmptyAcceptedDay(
+                beforeCommunityTwo.getWorkOrderTrendByCategory().get("SOS"));
+        LocalDate ordinaryDay = today.minusDays(6L - ordinaryDayIndex);
+        LocalDate sosDay = today.minusDays(6L - sosDayIndex);
+
+        WorkOrder ordinaryAccepted = insertWorkOrder(communityOneElder, "MANUAL", "CLOSED", ordinaryDay.atTime(10, 0));
+        insertAcceptanceHistory(ordinaryAccepted, "DISPATCHED", "ACCEPT", ordinaryDay.atTime(10, 8, 30));
+
+        DashboardChartsVO afterCommunityOne = dashboardService.getCharts(1L, "7D");
+        DashboardChartsVO afterCommunityTwo = dashboardService.getCharts(2L, "7D");
+        assertEquals(beforeCommunityOne.getWorkOrderTrend().getAcceptedCounts().get(ordinaryDayIndex) + 1,
+                afterCommunityOne.getWorkOrderTrend().getAcceptedCounts().get(ordinaryDayIndex));
+        assertEquals(beforeCommunityOne.getWorkOrderTrendByCategory().get("ORDINARY").getAcceptedCounts().get(ordinaryDayIndex) + 1,
+                afterCommunityOne.getWorkOrderTrendByCategory().get("ORDINARY").getAcceptedCounts().get(ordinaryDayIndex));
+        assertEquals(beforeCommunityOne.getWorkOrderTrendByCategory().get("SOS").getAcceptedCounts().get(ordinaryDayIndex),
+                afterCommunityOne.getWorkOrderTrendByCategory().get("SOS").getAcceptedCounts().get(ordinaryDayIndex));
+        assertEquals(beforeCommunityTwo.getWorkOrderTrend().getAcceptedCounts().get(ordinaryDayIndex),
+                afterCommunityTwo.getWorkOrderTrend().getAcceptedCounts().get(ordinaryDayIndex),
+                "社区 1 新增工单不得流入社区 2 看板");
+        assertEquals(8.5, afterCommunityOne.getWorkOrderTrendByCategory().get("ORDINARY").getAvgResponseMinutes().get(ordinaryDayIndex));
+
+        WorkOrder sosAccepted = insertWorkOrder(communityTwoElder, "SOS", "ACCEPTED", sosDay.atTime(11, 0));
+        insertAcceptanceHistory(sosAccepted, "PENDING_DISPATCH", "TRIGGER_SOS", sosDay.atTime(11, 0, 20));
+        DashboardChartsVO afterCommunityTwoSos = dashboardService.getCharts(2L, "7D");
+        DashboardChartsVO afterCommunityOneSos = dashboardService.getCharts(1L, "7D");
+        assertEquals(1L, afterCommunityTwoSos.getWorkOrderTrendByCategory().get("SOS").getAcceptedCounts().get(sosDayIndex)
+                        - beforeCommunityTwo.getWorkOrderTrendByCategory().get("SOS").getAcceptedCounts().get(sosDayIndex),
+                "SOS 自动接单应进入独立分类");
+        assertEquals(0.3, afterCommunityTwoSos.getWorkOrderTrendByCategory().get("SOS").getAvgResponseMinutes().get(sosDayIndex), 0.001);
+        assertEquals(beforeCommunityOne.getWorkOrderTrend().getAcceptedCounts().get(sosDayIndex)
+                        + (ordinaryDayIndex == sosDayIndex ? 1 : 0),
+                afterCommunityOneSos.getWorkOrderTrend().getAcceptedCounts().get(sosDayIndex),
+                "社区 2 的 SOS 工单不得流入社区 1 看板");
+
+        JsonNode serialized = objectMapper.valueToTree(afterCommunityOne);
+        assertTrue(serialized.at("/workOrderTrendByCategory/ORDINARY/acceptedCounts/" + ordinaryDayIndex).isNumber());
+        assertTrue(serialized.at("/workOrderTrendByCategory/ORDINARY/avgResponseMinutes/" + ordinaryDayIndex).isNumber());
+        assertTrue(serialized.at("/workOrderTrendByCategory/SOS").isObject());
+        assertEquals(ordinaryDay.format(DateTimeFormatter.ofPattern("MM-dd")),
+                serialized.at("/workOrderTrend/dateList/" + ordinaryDayIndex).asText());
+    }
+
+    private int firstEmptyAcceptedDay(cn.communityelderly.modules.dashboard.dto.WorkOrder7DayTrendVO trend) {
+        for (int index = 0; index < trend.getAcceptedCounts().size() - 1; index++) {
+            if (trend.getAcceptedCounts().get(index) == 0L) {
+                return index;
+            }
+        }
+        fail("固定隔离种子至少应有一个历史日无首次接单样本，供集成夹具验证空样本到有效样本的变化");
+        return -1;
+    }
+
+    private ElderProfile findElderInCommunity(Long communityId) {
+        ElderProfile elder = elderProfileMapper.selectOne(new LambdaQueryWrapper<ElderProfile>()
+                .eq(ElderProfile::getCommunityId, communityId)
+                .last("LIMIT 1"));
+        if (elder == null && communityId == 2L) {
+            String token = UUID.randomUUID().toString().replace("-", "");
+            elder = new ElderProfile();
+            elder.setArchiveNo("T5" + token.substring(0, 30));
+            elder.setCommunityId(communityId);
+            elder.setName("批次五合成老人");
+            elder.setAddress("隔离验收测试地址");
+            elder.setStatus("ACTIVE");
+            elder.setCreatedBy(1L);
+            elder.setUpdatedBy(1L);
+            assertEquals(1, elderProfileMapper.insert(elder));
+        }
+        assertNotNull(elder, "隔离种子必须为社区 " + communityId + " 提供老人档案");
+        return elder;
+    }
+
+    private WorkOrder insertWorkOrder(ElderProfile elder, String sourceType, String status, LocalDateTime createdAt) {
+        String token = UUID.randomUUID().toString().replace("-", "");
+        WorkOrder order = new WorkOrder();
+        order.setOrderNo("T5" + token.substring(0, 30));
+        order.setSourceType(sourceType);
+        order.setSourceReferenceId("T5-" + token);
+        order.setElderId(elder.getElderId());
+        order.setCommunityId(elder.getCommunityId());
+        order.setServiceType("SOS".equals(sourceType) ? "EMERGENCY_RESCUE" : "CLEANING");
+        order.setOrderTitle("批次 5 首次接单统计夹具");
+        order.setStatus(status);
+        order.setCreatedAt(createdAt);
+        assertEquals(1, workOrderMapper.insert(order));
+        return order;
+    }
+
+    private void insertAcceptanceHistory(WorkOrder order, String fromStatus, String actionName, LocalDateTime occurredAt) {
+        WorkOrderActionHistory action = new WorkOrderActionHistory();
+        action.setWorkOrderId(order.getWorkOrderId());
+        action.setOperatorUserId(1L);
+        action.setOperatorRole("CARE_WORKER");
+        action.setFromStatus(fromStatus);
+        action.setToStatus("ACCEPTED");
+        action.setActionName(actionName);
+        action.setComment("批次 5 手算夹具");
+        action.setTraceId("T5-" + UUID.randomUUID());
+        action.setOccurredAt(occurredAt);
+        assertEquals(1, workOrderActionHistoryMapper.insert(action));
     }
 
     @Test

@@ -8,7 +8,11 @@ public class WorkOrderExecutionDTO {
     @NotBlank(message = "服务完成总结说明不能为空")
     private String resultSummary;
 
-    private List<String> photoUrls;
+    private List<String> photoUrls; // Historical display only; not trusted for new submissions.
+    private List<String> evidenceAssetUuids;
+
+    public List<String> getEvidenceAssetUuids() { return evidenceAssetUuids; }
+    public void setEvidenceAssetUuids(List<String> ids) { this.evidenceAssetUuids = ids; }
 
     private Boolean isExemptPhoto;
 

@@ -114,7 +114,7 @@ class ReservationCancellationApproveServiceTest {
                 workOrderMapper, mock(WorkOrderAssignmentHistoryMapper.class), actionHistoryMapper,
                 mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class), elderMapper,
                 userMapper, mock(UserRoleMapper.class), linkMapper, reservationMapper, authorization,
-                auditLogService, notificationService, new ObjectMapper(), CLOCK);
+                auditLogService, notificationService, new ObjectMapper(), mock(cn.communityelderly.modules.order.service.FileEvidenceService.class), CLOCK);
         ServiceReservationServiceImpl reservationService = new ServiceReservationServiceImpl(
                 reservationMapper, mock(ServiceCatalogMapper.class), linkMapper, cancelMapper, elderMapper,
                 mock(ElderFamilyLinkMapper.class), mock(ElderIdentityLinkMapper.class), workOrderMapper,

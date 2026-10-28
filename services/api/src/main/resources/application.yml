@@ -3,6 +3,11 @@ spring:
     name: community-elderly-api
   profiles:
     default: local
+  servlet:
+    multipart:
+      # Transport headroom lets the domain validator audit the 5 MB rejection boundary.
+      max-file-size: 6MB
+      max-request-size: 7MB
   jackson:
     time-zone: Asia/Shanghai
 

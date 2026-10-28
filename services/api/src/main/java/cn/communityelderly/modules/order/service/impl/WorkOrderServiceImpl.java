@@ -33,6 +33,7 @@ import cn.communityelderly.modules.order.dto.WorkOrderHandoffRejectDTO;
 import cn.communityelderly.modules.order.entity.ServiceStopRequest;
 import cn.communityelderly.modules.order.mapper.ServiceStopRequestMapper;
 import cn.communityelderly.modules.order.service.WorkOrderService;
+import cn.communityelderly.modules.order.service.FileEvidenceService;
 import cn.communityelderly.modules.notification.dto.NotificationCreateEventDTO;
 import cn.communityelderly.modules.notification.service.NotificationService;
 import cn.communityelderly.modules.reservation.entity.ReservationExecutionLink;
@@ -82,6 +83,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final NotificationService notificationService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final FileEvidenceService evidenceService;
 
     public WorkOrderServiceImpl(WorkOrderMapper workOrderMapper,
                                 WorkOrderAssignmentHistoryMapper assignmentHistoryMapper,
@@ -97,6 +99,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                                 AuditLogService auditLogService,
                                 NotificationService notificationService,
                                 ObjectMapper objectMapper,
+                                FileEvidenceService evidenceService,
                                 Clock clock) {
         this.workOrderMapper = workOrderMapper;
         this.assignmentHistoryMapper = assignmentHistoryMapper;
@@ -113,6 +116,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         this.notificationService = notificationService;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.evidenceService = evidenceService;
     }
 
     @Override
@@ -344,7 +348,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     @Transactional
     public void submitExecutionResult(Long workOrderId, WorkOrderExecutionDTO dto, Long workerUserId) {
         WorkerActor actor = requireWorkerActor(workerUserId);
-        WorkOrder order = workOrderMapper.selectById(workOrderId);
+        WorkOrder order = selectWorkOrderForUpdate(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "工单不存在");
         }
@@ -354,6 +358,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BusinessException(ErrorCode.FORBIDDEN_ACCESS, "您不是该工单的责任人，无权提交服务总结");
         }
 
+        List<Long> submittedVersions = List.of();
         // 校验照片凭据或免照理由
         if (Boolean.TRUE.equals(dto.getIsExemptPhoto())) {
             if (!StringUtils.hasText(dto.getPhotoExemptionReason()) || dto.getPhotoExemptionReason().trim().length() < 5) {
@@ -361,14 +366,18 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             }
             order.setResultPhotoRequired(false);
             order.setPhotoExemptionReason(dto.getPhotoExemptionReason().trim());
-            order.setPhotoUrls(null);
+
         } else {
-            if (dto.getPhotoUrls() == null || dto.getPhotoUrls().isEmpty()) {
-                throw new BusinessException(ErrorCode.VALIDATION_FAILED, "非免照服务必须上传现场履约照片凭据");
+            try {
+                if (dto.getEvidenceAssetUuids() == null || dto.getEvidenceAssetUuids().isEmpty())
+                    throw new BusinessException(ErrorCode.VALIDATION_FAILED, "必须提交已校验的文件版本，历史照片地址不能作为新证据");
+                submittedVersions = evidenceService.resolveAndLink(workOrderId, dto.getEvidenceAssetUuids());
+            } catch (BusinessException exception) {
+                evidenceService.rejected(workOrderId, "FILE_EVIDENCE_SUBMIT", exception.getErrorCode());
+                throw exception;
             }
             order.setResultPhotoRequired(true);
             order.setPhotoExemptionReason(null);
-            order.setPhotoUrls(String.join(";", dto.getPhotoUrls()));
         }
 
         String fromStatus = order.getStatus();
@@ -378,7 +387,51 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         updateWorkOrderOrThrow(order);
 
         recordActionHistory(workOrderId, workerUserId, actor.historyRole, fromStatus, "PENDING_RESULT_REVIEW",
-                "SUBMIT_RESULT", "服务人员已完成上门履约并提交结案凭据，等待社区复核");
+                "SUBMIT_RESULT", "服务人员已完成上门履约并提交结案凭据，等待社区复核",
+                jsonPayload(payload("evidenceVersionIds", submittedVersions)));
+    }
+
+    @Override
+    public void assertCurrentMayUploadEvidence(Long workOrderId) {
+        CurrentUser current = authorizationPolicy.requireCurrentUser();
+        WorkOrder order = selectWorkOrderForUpdate(workOrderId);
+        if (order == null) throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        if (isCurrentRole(current, "CARE_WORKER")) {
+            requireCareWorkerOrder(order, requireCareWorkerScope(null));
+        } else if (isCurrentRole(current, "GRID_WORKER")) {
+            Long workerId = requireCurrentActor(currentUserId(current), "GRID_WORKER");
+            requireActiveStaffRole(workerId, "GRID_WORKER");
+            requireOrderInCurrentCommunity(order, "GRID_WORKER");
+            if (!workerId.equals(order.getCurrentAssigneeId()))
+                throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        } else {
+            requireOrderInCurrentCommunity(order, "COMMUNITY_ADMIN");
+        }
+        assertStatus(order, "PROCESSING");
+    }
+
+    @Override
+    public void assertCurrentMayReadEvidence(Long workOrderId) {
+        CurrentUser current = authorizationPolicy.requireCurrentUser();
+        WorkOrder order = workOrderMapper.selectById(workOrderId);
+        if (order == null) throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        if (isCurrentRole(current, "CARE_WORKER")) {
+            requireCareWorkerOrder(order, requireCareWorkerScope(null));
+        } else if (isCurrentRole(current, "GRID_WORKER")) {
+            Long workerId = currentUserId(current);
+            requireActiveStaffRole(workerId, "GRID_WORKER");
+            requireOrderInCurrentCommunity(order, "GRID_WORKER");
+            if (!workerId.equals(order.getCurrentAssigneeId()))
+                throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        } else if (isCurrentRole(current, "COMMUNITY_ADMIN")) {
+            requireOrderInCurrentCommunity(order, "COMMUNITY_ADMIN");
+        } else {
+            authorizationPolicy.requireRole("ELDER", "CHILD");
+            ElderProfile elder = authorizationPolicy.requireElderAccess(order.getElderId());
+            requireOrderCommunityMatchesElder(order, elder);
+            if (!"CLOSED".equals(order.getStatus()))
+                throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
     }
 
     @Override
@@ -398,7 +451,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     @Transactional
     public void reviewWorkOrder(Long workOrderId, WorkOrderReviewDTO dto, Long reviewerId) {
         requireCurrentActor(reviewerId, "COMMUNITY_ADMIN");
-        WorkOrder order = workOrderMapper.selectById(workOrderId);
+        WorkOrder order = selectWorkOrderForUpdate(workOrderId);
         if (order == null) {
             throw new BusinessException(ErrorCode.RECORD_NOT_FOUND, "工单不存在");
         }
@@ -412,6 +465,19 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         String fromStatus = order.getStatus();
 
         if ("APPROVE".equalsIgnoreCase(dto.getAction())) {
+            try {
+                if (!Boolean.FALSE.equals(order.getResultPhotoRequired())) {
+                    List<Long> versions = evidenceService.currentVersions(workOrderId);
+                    if (versions == null || versions.isEmpty())
+                        throw new BusinessException(ErrorCode.VALIDATION_FAILED, "缺少已校验照片凭据，不能结案");
+                    evidenceService.validate(workOrderId, versions, true);
+                } else if (!StringUtils.hasText(order.getPhotoExemptionReason()) || order.getPhotoExemptionReason().trim().length() < 5) {
+                    throw new BusinessException(ErrorCode.VALIDATION_FAILED, "缺少有效免照理由，不能结案");
+                }
+            } catch (BusinessException exception) {
+                evidenceService.rejected(workOrderId, "FILE_EVIDENCE_CLOSE", exception.getErrorCode());
+                throw exception;
+            }
             order.setStatus("CLOSED");
             order.setReviewerUserId(reviewerId);
             order.setReviewedAt(LocalDateTime.now(clock));
@@ -1593,6 +1659,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         } else {
             vo.setPhotoUrls(Collections.emptyList());
         }
+        fillEvidence(vo, order.getWorkOrderId());
         vo.setCreatedAt(order.getCreatedAt());
         vo.setUpdatedAt(order.getUpdatedAt());
         return vo;
@@ -1625,6 +1692,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         } else {
             vo.setPhotoUrls(Collections.emptyList());
         }
+        fillEvidence(vo, o.getWorkOrderId());
         vo.setReviewerUserId(o.getReviewerUserId());
         vo.setReviewedAt(o.getReviewedAt());
         vo.setReviewComment(o.getReviewComment());
@@ -1657,6 +1725,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         }
 
         return vo;
+    }
+
+    private void fillEvidence(WorkOrderVO vo, Long workOrderId) {
+        List<Long> versions = evidenceService.currentVersions(workOrderId);
+        vo.setEvidenceAssetUuids(versions == null ? List.of() : evidenceService.assetUuids(workOrderId, versions));
+        if (versions != null && !versions.isEmpty()) vo.setPhotoUrls(evidenceService.urls(workOrderId, versions));
     }
 
     private String formatOrderStatus(String status) {

@@ -207,12 +207,15 @@ export interface WorkOrder7DayTrendVO {
   dispatchedCounts: Array<number | null> | null
   closedCounts: Array<number | null> | null
   avgResponseMinutes: Array<number | null> | null
+  acceptedCounts: Array<number | null> | null
+  unacceptedCounts: Array<number | null> | null
 }
 
 export interface DashboardChartsVO {
   diseaseDistribution: DiseaseDistributionVO[] | null
   serviceStructure: ServiceStructureVO[] | null
   workOrderTrend: WorkOrder7DayTrendVO | null
+  workOrderTrendByCategory: Record<'ORDINARY' | 'SOS', WorkOrder7DayTrendVO> | null
 }
 
 export interface RealtimeAlertFeedVO {
@@ -365,7 +368,7 @@ export const adminApi = {
   dispatchWorkOrder(workOrderId: number, data: { assigneeId: number; dispatchNotes?: string }) {
     return postWithIdempotencyKey(`/work-orders/${workOrderId}/dispatch`, data)
   },
-  submitWorkOrderResult(workOrderId: number, data: { resultSummary: string; photoUrls?: string[]; isExemptPhoto?: boolean; photoExemptionReason?: string }) {
+  submitWorkOrderResult(workOrderId: number, data: { resultSummary: string; evidenceAssetUuids?: string[]; photoUrls?: string[]; isExemptPhoto?: boolean; photoExemptionReason?: string }) {
     return postWithIdempotencyKey(`/work-orders/${workOrderId}/execution/submit`, data, true)
   },
   reviewWorkOrder(workOrderId: number, data: { action: string; reviewComment?: string }) {
@@ -373,11 +376,11 @@ export const adminApi = {
   },
 
   // 文件上传 (工单履约凭据照片)
-  uploadPhotoEvidence(file: File, workOrderId?: number) {
+  uploadPhotoEvidence(file: File, workOrderId: number) {
     const formData = new FormData()
     formData.append('file', file)
     if (workOrderId !== undefined) formData.append('workOrderId', String(workOrderId))
-    return http.request<{ url: string; fileName: string; size: number }>('/files/upload', {
+    return http.request<{ url: string; filename: string; assetUuid: string }>('/files/upload', {
       method: 'POST',
       body: formData,
     })

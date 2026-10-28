@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(0, 300)]
     [int]$HoldSeconds = 0
@@ -295,6 +295,15 @@ function Get-IsolatedTestSideEffectSnapshot {
     return (Get-IsolatedBusinessFacts) + '||' + (Get-StaffMutationSnapshot)
 }
 
+# File rejections intentionally commit one independent audit row; all other facts stay identical.
+function Test-FileRejectionSnapshot([string]$Before, [string]$After) {
+    $beforeIndex = $Before.LastIndexOf('|')
+    $afterIndex = $After.LastIndexOf('|')
+    if ($beforeIndex -lt 0 -or $afterIndex -lt 0) { return $false }
+    return ($Before.Substring(0, $beforeIndex) -ceq $After.Substring(0, $afterIndex) -and
+        [long]$After.Substring($afterIndex + 1) -eq ([long]$Before.Substring($beforeIndex + 1) + 1))
+}
+
 function Get-SessionFactsForUser([long]$UserId) {
     $result = Invoke-AppDatabaseQuery @"
 SELECT CONCAT_WS('|',
@@ -440,6 +449,12 @@ SET @syshttp_staff_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_norma
 SET @syshttp_cross_staff_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_normalized = '$crossStaffPhone' AND account_kind = 'STAFF' LIMIT 1), 0);
 SET @syshttp_family_user_id = COALESCE((SELECT user_id FROM sys_user WHERE phone_normalized = '$familyPhone' AND account_kind = 'FAMILY' LIMIT 1), 0);
 SET @syshttp_family_elder_id = COALESCE((SELECT elder_id FROM elder_profile WHERE archive_no = '$familyArchiveNo' LIMIT 1), 0);
+CREATE TEMPORARY TABLE syshttp_cleanup_assets AS SELECT asset_id FROM file_upload_session WHERE work_order_id IN ($orderIdList);
+DELETE FROM business_file_link WHERE business_type = 'WORK_ORDER' AND business_id IN (SELECT CAST(work_order_id AS CHAR) FROM work_order WHERE work_order_id IN ($orderIdList));
+DELETE FROM file_upload_session WHERE work_order_id IN ($orderIdList);
+DELETE FROM file_asset_version WHERE asset_id IN (SELECT asset_id FROM syshttp_cleanup_assets);
+DELETE FROM file_asset WHERE asset_id IN (SELECT asset_id FROM syshttp_cleanup_assets);
+DROP TEMPORARY TABLE syshttp_cleanup_assets;
 DELETE FROM work_order_action_history WHERE work_order_id IN ($orderIdList);
 DELETE FROM work_order_assignment_history WHERE work_order_id IN ($orderIdList);
 DELETE FROM work_order_handoff WHERE work_order_id IN ($orderIdList);
@@ -1532,7 +1547,7 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
             -AssigneeId $staffTargetUserId -ElderId 1 -CommunityId 1
     }
     $careEvidencePath = Join-Path $tempRoot 'system-http-care-evidence.png'
-    $careEvidenceBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l5sAAAAASUVORK5CYII=')
+    $careEvidenceBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC')
     [IO.File]::WriteAllBytes($careEvidencePath, $careEvidenceBytes)
 
     $missingOrderFactsBefore = Get-IsolatedTestSideEffectSnapshot
@@ -1540,9 +1555,9 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
     $missingOrderUpload = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken -Client $careHttpContext.Client
     $missingOrderFactsAfter = Get-IsolatedTestSideEffectSnapshot
     $missingOrderFileCountAfter = Get-StorageFileCount
-    $missingOrderFactsUnchanged = $missingOrderFactsBefore -eq $missingOrderFactsAfter
+    $missingOrderFactsUnchanged = (Test-FileRejectionSnapshot $missingOrderFactsBefore $missingOrderFactsAfter)
     $missingOrderFilesUnchanged = $missingOrderFileCountBefore -eq $missingOrderFileCountAfter
-    Confirm-Chain '护工缺少 workOrderId 上传返回 HTTP 422 且无 DB/session/audit/文件副作用' `
+    Confirm-Chain '护工缺少 workOrderId 上传返回 HTTP 422 且仅增加一条拒绝审计' `
         ($missingOrderUpload.StatusCode -eq 422 -and $missingOrderFactsUnchanged -and
             $missingOrderFilesUnchanged) `
         "A care-worker upload without workOrderId was not rejected without writes (HTTP $($missingOrderUpload.StatusCode), dbSnapshotUnchanged=$missingOrderFactsUnchanged, filesUnchanged=$missingOrderFilesUnchanged)."
@@ -1563,7 +1578,7 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         $terminalFileCountAfter = Get-StorageFileCount
         Confirm-Chain "护工终态 $terminalStatus 即使保留承接人也不可列出/读取/上传" `
             (-not $terminalListed -and $terminalDetailResponse.StatusCode -eq 404 -and $terminalUpload.StatusCode -eq 404 -and
-                $terminalFactsBefore -eq $terminalFactsAfter -and $terminalFileCountBefore -eq $terminalFileCountAfter) `
+                (Test-FileRejectionSnapshot $terminalFactsBefore $terminalFactsAfter) -and $terminalFileCountBefore -eq $terminalFileCountAfter) `
             "A terminal $terminalStatus care order remained visible or its denied upload wrote isolated state/file data."
     }
 
@@ -1577,7 +1592,7 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
     $nonAssigneeFileCountAfter = Get-StorageFileCount
     Confirm-Chain '护工不可读取或上传非本人承接工单且无副作用/文件写入' `
         ($nonAssigneeDetail.StatusCode -eq 404 -and $nonAssigneeUpload.StatusCode -eq 404 -and
-            $nonAssigneeFactsBefore -eq $nonAssigneeFactsAfter -and $nonAssigneeFileCountBefore -eq $nonAssigneeFileCountAfter) `
+            (Test-FileRejectionSnapshot $nonAssigneeFactsBefore $nonAssigneeFactsAfter) -and $nonAssigneeFileCountBefore -eq $nonAssigneeFileCountAfter) `
         'A care worker accessed another worker order or its denied upload wrote isolated state/file data.'
 
     $reassignResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careReassignedOrderId/dispatch" `
@@ -1596,7 +1611,7 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
     Confirm-Chain '工单经管理员改派后原护工不可读取/上传且不写文件' `
         ($reassignedAssignee.ExitCode -eq 0 -and $reassignedAssignee.StdOut.Trim() -eq [string]$workerAccount.UserId -and
             $reassignedCareDetail.StatusCode -eq 404 -and $reassignedUpload.StatusCode -eq 404 -and
-            $reassignedFactsBefore -eq $reassignedFactsAfter -and $reassignedFileCountBefore -eq $reassignedFileCountAfter) `
+            (Test-FileRejectionSnapshot $reassignedFactsBefore $reassignedFactsAfter) -and $reassignedFileCountBefore -eq $reassignedFileCountAfter) `
         'A reassigned care worker retained access or the denied upload wrote isolated state/file data.'
 
     $crossCommunityCareDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careCrossCommunityOrderId" `
@@ -1607,9 +1622,9 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
         -WorkOrderId $careCrossCommunityOrderId -Client $careHttpContext.Client
     $crossCareFactsAfter = Get-IsolatedTestSideEffectSnapshot
     $crossCareFileCountAfter = Get-StorageFileCount
-    Confirm-Chain '护工跨社区工单读取/上传均拒绝且无 DB/session/audit/文件副作用' `
+    Confirm-Chain '护工跨社区工单读取/上传均拒绝且仅增加一条拒绝审计' `
         ($crossCommunityCareDetail.StatusCode -eq 404 -and $crossCommunityCareUpload.StatusCode -eq 404 -and
-            $crossCareFactsBefore -eq $crossCareFactsAfter -and $crossCareFileCountBefore -eq $crossCareFileCountAfter) `
+            (Test-FileRejectionSnapshot $crossCareFactsBefore $crossCareFactsAfter) -and $crossCareFileCountBefore -eq $crossCareFileCountAfter) `
         'A care worker accessed a different-community order or its denied upload wrote isolated state/file data.'
 
     $careArchiveFactsBefore = Get-IsolatedTestSideEffectSnapshot
@@ -1656,25 +1671,52 @@ SELECT CONCAT(@syshttp_family_user_id, '|', @syshttp_family_elder_id);
     Confirm-Chain '护工开始服务后工单状态为 PROCESSING' ([string]$careProcessingJson.data.status -eq 'PROCESSING') `
         'The assigned care order did not transition to PROCESSING.'
 
+    $forgedEvidencePath = Join-Path $tempRoot 'forged-evidence.png'
+    [IO.File]::WriteAllBytes($forgedEvidencePath, [byte[]]@(1, 2, 3))
+    $forgedFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $forgedFileCountBefore = Get-StorageFileCount
+    $forgedUpload = Invoke-PhotoUpload -Path $forgedEvidencePath -BearerToken $careToken -WorkOrderId $careWorkOrderId -Client $careHttpContext.Client
+    $forgedFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    Confirm-Chain '伪 PNG 内容上传被拒绝且仅提交一条拒绝审计' `
+        ($forgedUpload.StatusCode -eq 422 -and (Test-FileRejectionSnapshot $forgedFactsBefore $forgedFactsAfter) -and
+            (Get-StorageFileCount) -eq $forgedFileCountBefore) 'Forged PNG content was accepted or changed business/files.'
+
     $careFileCountBefore = Get-StorageFileCount
     $careUploadResponse = Invoke-PhotoUpload -Path $careEvidencePath -BearerToken $careToken `
         -WorkOrderId $careWorkOrderId -Client $careHttpContext.Client
     $careUploadJson = Assert-OkApiResponse $careUploadResponse 'CARE_WORKER order-bound evidence upload'
     $carePhotoUrl = [string]$careUploadJson.data.url
     $careFileCountAfter = Get-StorageFileCount
-    $carePhotoView = if ($carePhotoUrl) { Invoke-Api -Method 'GET' -Path $carePhotoUrl -Client $careHttpContext.Client } else { $null }
+    $carePhotoView = if ($carePhotoUrl) { Invoke-Api -Method 'GET' -Path $carePhotoUrl -BearerToken $careToken -Client $careHttpContext.Client } else { $null }
     Confirm-Chain '护工使用 workOrderId 成功上传凭据且文件写入隔离 APP_STORAGE_ROOT' `
         ($carePhotoUrl -match '^/api/v1/files/view/[^/]+\.png$' -and
-            [string]$careUploadJson.data.filename -match '^[A-Fa-f0-9]+\.png$' -and
+            [string]$careUploadJson.data.filename -match '^[A-Fa-f0-9-]+\.png$' -and
             $careFileCountAfter -eq ($careFileCountBefore + 1) -and $null -ne $carePhotoView -and $carePhotoView.StatusCode -eq 200) `
         'A valid order-bound care-worker upload did not create exactly one readable file under isolated storage.'
+
+    $anonymousFileRead = Invoke-Api -Method 'GET' -Path $carePhotoUrl -Client $anonymousHttpContext.Client
+    $otherWorkerFileRead = Invoke-Api -Method 'GET' -Path $carePhotoUrl -BearerToken $workerAccount.Token -Client $workerHttpContext.Client
+    Confirm-Chain '已知文件地址禁止匿名和非当前承接人读取且响应不可公开缓存' `
+        ($anonymousFileRead.StatusCode -eq 401 -and $otherWorkerFileRead.StatusCode -eq 404 -and
+            $carePhotoView.Response.Headers.CacheControl.NoStore) 'File read authorization or cache policy was not enforced.'
 
     $careExecutionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$careWorkOrderId/execution" `
         -BearerToken $careToken -IdempotencyKey ('SYSHTTP-CARE-EXECUTION-' + [Guid]::NewGuid().ToString('N')) `
         -Client $careHttpContext.Client -Body @{
-            resultSummary = '隔离护工 HTTP 验收已完成。'; photoUrls = @($carePhotoUrl); isExemptPhoto = $false
+            resultSummary = '隔离护工 HTTP 验收已完成。'; evidenceAssetUuids = @([string]$careUploadJson.data.assetUuid); isExemptPhoto = $false
         }
     $null = Assert-OkApiResponse $careExecutionResponse 'CARE_WORKER execution submission'
+    $crossFileOrderId = New-SyntheticWorkOrder -Status 'PROCESSING' -AssigneeId $staffTargetUserId -ElderId 1 -CommunityId 1
+    $crossFileFactsBefore = Get-IsolatedTestSideEffectSnapshot
+    $crossFileSubmit = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$crossFileOrderId/execution" `
+        -BearerToken $careToken -Client $careHttpContext.Client -IdempotencyKey ('SYSHTTP-CROSS-FILE-' + [Guid]::NewGuid().ToString('N')) `
+        -Body @{ resultSummary = '跨工单凭据应当被拒绝'; evidenceAssetUuids = @([string]$careUploadJson.data.assetUuid); isExemptPhoto = $false }
+    $crossFileFactsAfter = Get-IsolatedTestSideEffectSnapshot
+    $crossFileLinkCount = Invoke-AppDatabaseQuery "SELECT COUNT(*) FROM business_file_link WHERE business_type='WORK_ORDER' AND business_id='$crossFileOrderId';"
+    Confirm-Chain '跨工单复用文件版本被拒绝且业务回滚后拒绝审计仍可查' `
+        ($crossFileSubmit.StatusCode -eq 404 -and (Test-FileRejectionSnapshot $crossFileFactsBefore $crossFileFactsAfter) -and
+            $crossFileLinkCount.ExitCode -eq 0 -and $crossFileLinkCount.StdOut.Trim() -eq '0') 'Cross-order evidence reuse was accepted or rejection audit was rolled back.'
+
     $careExecutionDetail = Invoke-Api -Method 'GET' -Path "/api/v1/work-orders/$careWorkOrderId" `
         -BearerToken $careToken -Client $careHttpContext.Client
     $careExecutionJson = Assert-OkApiResponse $careExecutionDetail 'CARE_WORKER execution readback'
@@ -2265,22 +2307,22 @@ SELECT CONCAT(record_state, '|', response_status, '|', JSON_VALID(response_body)
         'POST /api/v1/work-orders/{id}/start did not transition the accepted order to PROCESSING.'
 
     $evidencePath = Join-Path $tempRoot 'system-http-evidence.png'
-    $evidenceBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l5sAAAAASUVORK5CYII=')
+    $evidenceBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC')
     [IO.File]::WriteAllBytes($evidencePath, $evidenceBytes)
-    $uploadResponse = Invoke-PhotoUpload -Path $evidencePath -BearerToken $workerAccount.Token
+    $uploadResponse = Invoke-PhotoUpload -Path $evidencePath -BearerToken $workerAccount.Token -WorkOrderId $workOrderId
     $uploadJson = Assert-OkApiResponse $uploadResponse 'Grid-worker evidence upload'
     $photoUrl = [string]$uploadJson.data.url
     $photoFilename = [string]$uploadJson.data.filename
-    $photoViewResponse = if ($photoUrl) { Invoke-Api -Method 'GET' -Path $photoUrl } else { $null }
+    $photoViewResponse = if ($photoUrl) { Invoke-Api -Method 'GET' -Path $photoUrl -BearerToken $workerAccount.Token } else { $null }
     Confirm-Chain '网格员上传现场照片并得到临时文件 URL' `
-        ($photoUrl -match '^/api/v1/files/view/[^/]+\.png$' -and $photoFilename -match '^[A-Fa-f0-9]+\.png$' -and
+        ($photoUrl -match '^/api/v1/files/view/[^/]+\.png$' -and $photoFilename -match '^[A-Fa-f0-9-]+\.png$' -and
             $null -ne $photoViewResponse -and $photoViewResponse.StatusCode -eq 200) `
         'POST /api/v1/files/upload failed to return a viewable PNG URL from the isolated application working directory.'
 
     $executionResponse = Invoke-Api -Method 'POST' -Path "/api/v1/work-orders/$workOrderId/execution" `
         -BearerToken $workerAccount.Token -IdempotencyKey ('SYSHTTP-WORK-EXECUTION-' + [Guid]::NewGuid().ToString('N')) -Body @{
         resultSummary = '已按预约完成上门照护与现场核验。'
-        photoUrls = @($photoUrl)
+        evidenceAssetUuids = @([string]$uploadJson.data.assetUuid)
         isExemptPhoto = $false
     }
     $null = Assert-OkApiResponse $executionResponse 'Grid-worker execution submission'
