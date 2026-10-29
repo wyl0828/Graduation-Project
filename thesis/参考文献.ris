@@ -232,3 +232,185 @@ TI  - 2021年4月8日新闻发布会：我国养老呈“9073”格局（老龄�
 PY  - 2021
 N1  - 约90%居家养老、7%依托社区、3%入住机构；引前须补发布会实录URL
 ER  - 
+
+TY  - JOUR
+AU  - Wickramathilaka, Shavindra
+AU  - Grundy, John
+AU  - Madampe, Kashumi
+AU  - Haggag, Omar
+TI  - Accessibility recommendations for designing better mobile application user interfaces for seniors
+JO  - arXiv preprint arXiv:2504.12690
+PY  - 2025
+DO  - 10.48550/arXiv.2504.12690
+UR  - https://arxiv.org/abs/2504.12690
+N1  - 投稿 ACM TOSEM 中，未正式发表；按预印本引用，投稿前需复查是否已见刊
+ER  - 
+
+TY  - JOUR
+AU  - Sagga, Hasan Ali
+AU  - Stone, Richard
+TI  - Older adults and technology design from the HCI perspective: a literature review
+JO  - International Journal of Advanced Computer Science and Applications
+VL  - 16
+IS  - 7
+PY  - 2025
+DO  - 10.14569/IJACSA.2025.0160790
+UR  - https://thesai.org/Downloads/Volume16No7/Paper_90-Older_Adults_and_Technology_Design.pdf
+ER  -
+
+TY  - JOUR
+AU  - Liu, Na
+AU  - Yin, Jiamin
+AU  - Tan, Sharon Swee-Lin
+AU  - Ngiam, Kee Yuan
+AU  - Teo, Hock Hai
+TI  - Mobile health applications for older adults: a systematic review of interface and persuasive feature design
+JO  - Journal of the American Medical Informatics Association
+VL  - 28
+IS  - 11
+SP  - 2411
+EP  - 2421
+PY  - 2021
+DO  - 10.1093/jamia/ocab151
+ER  - 
+
+TY  - CONF
+AU  - Tang, Chuzhe
+AU  - Wang, Zhaoguo
+AU  - Zhang, Xiaodong
+AU  - Yu, Qianmian
+AU  - Zang, Binyu
+AU  - Guan, Haibing
+AU  - Chen, Haibo
+TI  - Ad hoc transactions in web applications: the good, the bad, and the ugly
+T2  - Proceedings of the 2022 International Conference on Management of Data (SIGMOD '22)
+SP  - 1862
+EP  - 1875
+PY  - 2022
+PB  - ACM
+DO  - 10.1145/3514221.3526129
+ER  - 
+
+TY  - JOUR
+AU  - 钟仁耀
+AU  - 王怀月
+TI  - 城市社区智能居家养老服务模式探讨
+JO  - 理论探索
+IS  - 3
+SP  - 90
+EP  - 97
+PY  - 2023
+ER  - 
+
+TY  - JOUR
+AU  - 满小欧
+AU  - 杨扬
+AU  - 张雷
+TI  - 区块链赋能社区居家智慧养老服务的耦合机制与实现路径研究
+JO  - 中国海洋大学学报(社会科学版)
+IS  - 3
+SP  - 90
+EP  - 100
+PY  - 2025
+ER  - 
+
+TY  - JOUR
+AU  - 邢珍珍
+TI  - 人工智能赋能下社区智慧养老服务模式及关键技术研究
+JO  - 护理研究
+VL  - 35
+IS  - 9
+SP  - 1573
+EP  - 1579
+PY  - 2021
+ER  - 
+
+TY  - JOUR
+AU  - 郑璐
+AU  - 李明珠
+AU  - 黄黎清
+AU  - 巢文博
+AU  - 严慧
+TI  - 移动应用适老化设计策略
+JO  - 老龄科学研究
+VL  - 10
+IS  - 7
+SP  - 28
+EP  - 39
+PY  - 2022
+ER  - 
+
+TY  - JOUR
+AU  - 黄铿达
+AU  - 岑岗
+AU  - 徐镇涛
+AU  - 夏雨晴
+TI  - 老年人手机生活助手移动应用的设计与实现
+JO  - 浙江科技学院学报
+VL  - 32
+IS  - 4
+SP  - 321
+EP  - 328
+PY  - 2020
+ER  - 
+
+TY  - JOUR
+AU  - 周琪
+AU  - 陶月仙
+AU  - 杜行
+TI  - 我国智慧养老平台建设存在的问题与对策
+JO  - 科技创新与应用
+VL  - 14
+IS  - 4
+SP  - 123
+EP  - 127
+PY  - 2024
+ER  - 
+
+TY  - THES
+AU  - 瞿珞涵
+TI  - 基于微信小程序的农村养老院康养管理系统设计与实现
+PB  - 华中师范大学
+CY  - 武汉
+PY  - 2025
+ER  - 
+
+TY  - THES
+AU  - 董二帅
+TI  - 智慧养老系统的设计——以呼和浩特市为例
+PB  - 内蒙古大学
+CY  - 呼和浩特
+PY  - 2023
+ER  - 
+
+TY  - THES
+AU  - 汪莹
+TI  - 智慧养老服务平台中移动APP的设计与实现
+PB  - 北京邮电大学
+CY  - 北京
+PY  - 2022
+ER  - 
+
+TY  - THES
+AU  - 张欣悦
+TI  - 基于服务接触理论的智慧社区养老服务系统设计研究
+PB  - 华东理工大学
+CY  - 上海
+PY  - 2025
+ER  - 
+
+TY  - THES
+AU  - 胡巧倩
+TI  - 智慧养老服务平台的规则引擎模块的设计与实现
+PB  - 北京邮电大学
+CY  - 北京
+PY  - 2022
+ER  - 
+
+TY  - THES
+AU  - 张金润
+TI  - 物联网环境下智慧养老在线监测系统设计
+PB  - 安徽理工大学
+CY  - 淮南
+PY  - 2021
+ER  - 
