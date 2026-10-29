@@ -13,11 +13,29 @@ npm run type-check       # Vue 3 / TypeScript 类型检查
 npm run dev:h5           # 启动本地 H5 实时开发服务 (可直观审查页面交互)
 npm run build:h5         # H5 生产打包构建
 npm run build:mp-weixin  # 微信小程序打包构建
+npm run build:mp-weixin:ecs  # 指向当前 ECS 的微信小程序构建
 ```
 
 ## API 地址
 
-H5 开发模式通过 Vite 将 `/api/v1` 代理到本机 `http://127.0.0.1:8080`。微信小程序构建前必须配置设备能够访问的 API 根地址，例如在本地环境文件设置 `VITE_API_BASE_URL=https://你的测试域名/api/v1`。未配置时小程序请求会明确报错；设备上的 `127.0.0.1` 不能指向开发电脑。API 所在域名及 HTTPS 配置还需在微信开发者工具和小程序平台核验。
+H5 开发模式通过 Vite 将 `/api/v1` 代理到本机 `http://127.0.0.1:8080`。微信小程序构建前必须通过构建环境配置设备能够访问的 API 根地址；构建命令会在生成产物前校验该变量：
+
+```powershell
+# 微信开发者工具模拟器与 API 在同一台电脑时
+$env:VITE_API_BASE_URL='http://127.0.0.1:8080/api/v1'
+npm run build:mp-weixin
+
+# 真机或正式环境使用设备可访问的 HTTPS 域名
+$env:VITE_API_BASE_URL='https://你的测试域名/api/v1'
+npm run build:mp-weixin
+
+# 当前 ECS 发布目标：只影响微信小程序构建，不改变 H5 本地代理
+npm run build:mp-weixin:ecs
+```
+
+未配置、不是绝对 URL 或不包含 `/api/v1` 时，构建会直接失败；设备上的 `127.0.0.1` 不能指向开发电脑。API 所在域名及 HTTPS 配置还需在微信开发者工具和小程序平台核验。H5 不要把该变量写入通用 `.env.local`，否则可能绕过本地 `/api` 代理。
+
+`build:mp-weixin:ecs` 当前将 `VITE_API_BASE_URL` 固定为 `https://aimianshi.xyz/api/v1`，用于生成指向现有 ECS 的小程序包；更换环境时请使用通用的 `build:mp-weixin` 并显式设置变量。
 
 前端类型检查或构建通过，只能证明产物可编译；真实账号、网络和业务流程以隔离数据库上的 HTTP 冒烟及后续真机验证为准。
 

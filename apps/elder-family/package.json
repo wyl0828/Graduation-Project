@@ -2,6 +2,7 @@
   "name": "community-elderly-mini",
   "version": "0.0.0",
   "scripts": {
+    "test:mp-api-env": "node --test scripts/mp-api-env.test.mjs",
     "dev:custom": "uni -p",
     "dev:h5": "uni",
     "dev:h5:ssr": "uni --ssr",
@@ -29,7 +30,9 @@
     "build:mp-qq": "uni build -p mp-qq",
     "build:mp-toutiao": "uni build -p mp-toutiao",
     "build:mp-harmony": "uni build -p mp-harmony",
+    "prebuild:mp-weixin": "node scripts/check-mp-api-env.mjs",
     "build:mp-weixin": "uni build -p mp-weixin",
+    "build:mp-weixin:ecs": "node scripts/build-mp-weixin.mjs https://aimianshi.xyz/api/v1",
     "build:mp-xhs": "uni build -p mp-xhs",
     "build:quickapp-webview": "uni build -p quickapp-webview",
     "build:quickapp-webview-huawei": "uni build -p quickapp-webview-huawei",
