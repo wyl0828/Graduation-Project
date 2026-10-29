@@ -12,6 +12,7 @@ import cn.communityelderly.modules.elder.entity.ElderProfile;
 import cn.communityelderly.modules.elder.mapper.ElderActivationTicketMapper;
 import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.elder.service.ElderArchiveService;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.springframework.stereotype.Service;
@@ -31,13 +32,16 @@ public class ElderArchiveServiceImpl implements ElderArchiveService {
     private final ElderProfileMapper elderProfileMapper;
     private final ElderActivationTicketMapper activationTicketMapper;
     private final ObjectAuthorizationPolicy authorizationPolicy;
+    private final WorkOrderService workOrderService;
 
     public ElderArchiveServiceImpl(ElderProfileMapper elderProfileMapper,
                                    ElderActivationTicketMapper activationTicketMapper,
-                                   ObjectAuthorizationPolicy authorizationPolicy) {
+                                   ObjectAuthorizationPolicy authorizationPolicy,
+                                   WorkOrderService workOrderService) {
         this.elderProfileMapper = elderProfileMapper;
         this.activationTicketMapper = activationTicketMapper;
         this.authorizationPolicy = authorizationPolicy;
+        this.workOrderService = workOrderService;
     }
 
     @Override
@@ -136,11 +140,23 @@ public class ElderArchiveServiceImpl implements ElderArchiveService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateElderStatus(Long elderId, String status, String reason) {
-        ElderProfile profile = authorizationPolicy.requireElderInCurrentCommunity(elderId, "COMMUNITY_ADMIN");
-        profile.setStatus(status.toUpperCase());
+        authorizationPolicy.requireElderInCurrentCommunity(elderId, "COMMUNITY_ADMIN");
+        // Share the elder-first lock order with reservation creation and confirmation.
+        ElderProfile profile = elderProfileMapper.selectByIdForUpdate(elderId);
+        if (profile == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        String normalizedStatus = status.toUpperCase();
+        if ("INACTIVE".equals(normalizedStatus) && !"INACTIVE".equalsIgnoreCase(profile.getStatus())) {
+            workOrderService.assertElderMayBeDeactivated(elderId);
+        }
+        profile.setStatus(normalizedStatus);
         profile.setStatusReason(reason);
         profile.setUpdatedAt(LocalDateTime.now());
-        elderProfileMapper.updateById(profile);
+        if (elderProfileMapper.updateById(profile) < 1) {
+            throw new BusinessException(ErrorCode.OPTIMISTIC_LOCK_CONFLICT,
+                    "老人档案已被其他操作更新，请刷新后重试");
+        }
     }
 
     @Override

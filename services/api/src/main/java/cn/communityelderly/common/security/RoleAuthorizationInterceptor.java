@@ -56,7 +56,7 @@ public class RoleAuthorizationInterceptor implements HandlerInterceptor {
 
     private boolean isAnonymousEndpoint(String method, String path) {
         // Public service catalogue: non-sensitive, needed before login to browse offerings.
-        if (HttpMethod.GET.matches(method) && ("/api/v1/service-catalogs".equals(path) || path.startsWith("/api/v1/files/view/"))) {
+        if (HttpMethod.GET.matches(method) && "/api/v1/service-catalogs".equals(path)) {
             return true;
         }
         if (!HttpMethod.POST.matches(method)) {

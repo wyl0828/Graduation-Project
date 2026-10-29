@@ -147,7 +147,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { ApiError } from '../../api/http'
-import { adminApi } from '../../api/adminApi'
+import { adminApi, clearPendingIdempotencyKey } from '../../api/adminApi'
 
 type WorkOrder = {
   workOrderId: number
@@ -210,7 +210,9 @@ function formatDate(value?: string | null) {
 function apiErrorMessage(error: unknown) {
   const apiError = error as ApiError
   if (apiError?.status === 401) return '登录状态已失效，请重新登录后再操作。'
-  if (apiError?.status === 409) return '工单状态已变化，页面没有提交本地成功状态，请刷新后重试。'
+  if (apiError?.status === 409) return apiError.message
+    ? `服务端暂未确认操作（HTTP 409）：${apiError.message}`
+    : '服务端暂未确认操作（HTTP 409），请稍后重试并核对工单状态。'
   if (apiError?.status) return apiError.message || `服务端请求失败（HTTP ${apiError.status}）`
   if (error instanceof Error) return error.message
   return '服务暂不可用，请检查网络后重试。'
@@ -277,15 +279,17 @@ async function submitDispatch() {
   actionLoading.value = true
   operationError.value = ''
   try {
-    await adminApi.dispatchWorkOrderToWorker(order.workOrderId, {
+    const requestBody = {
       assigneeUserId: assigneeId,
       reason: dispatchReason.value.trim() || undefined,
-    })
+    }
+    await adminApi.dispatchWorkOrderToWorker(order.workOrderId, requestBody)
     const detailResponse = await adminApi.getWorkOrderDetail(order.workOrderId)
     const updated = requireOrderDetail(detailResponse.data)
     if (updated.status !== 'DISPATCHED' || updated.currentAssigneeId !== assigneeId) {
       throw new Error('派单请求已返回，但服务端详情未确认目标责任人和 DISPATCHED 状态。')
     }
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/dispatch`, requestBody)
     orders.value = orders.value.map(item => item.workOrderId === updated.workOrderId ? updated : item)
     dispatchModalVisible.value = false
     ElMessage.success('工单派单状态已由服务端详情回读确认。')
@@ -316,12 +320,14 @@ async function submitReview() {
   actionLoading.value = true
   operationError.value = ''
   try {
-    await adminApi.reviewWorkOrder(order.workOrderId, { action: 'APPROVE', reviewComment: comment })
+    const requestBody = { action: 'APPROVE', reviewComment: comment }
+    await adminApi.reviewWorkOrder(order.workOrderId, requestBody)
     const detailResponse = await adminApi.getWorkOrderDetail(order.workOrderId)
     const closedOrder = requireOrderDetail(detailResponse.data)
     if (closedOrder.status !== 'CLOSED') {
       throw new Error('结案审核请求已返回，但服务端详情未确认 CLOSED 状态。')
     }
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/review`, requestBody)
     orders.value = orders.value.filter(item => item.workOrderId !== closedOrder.workOrderId)
     reviewModalVisible.value = false
     ElMessage.success('工单 CLOSED 状态已由服务端详情回读确认。')

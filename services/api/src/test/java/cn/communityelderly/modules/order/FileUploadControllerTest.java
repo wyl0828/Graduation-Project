@@ -39,15 +39,15 @@ class FileUploadControllerTest {
     void careWorkerUploadRejectsUnassignedOrderBeforeSavingFile(@TempDir Path appStorageRoot) throws IOException {
         WorkOrderService service = mock(WorkOrderService.class);
         doThrow(new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE))
-                .when(service).assertCurrentCareWorkerMayUpload(201L);
-        FileUploadController controller = new FileUploadController(service, appStorageRoot.toString());
+                .when(service).assertCurrentMayUploadEvidence(201L);
+        FileUploadController controller = controller(service, appStorageRoot);
         UserContext.set(user("77", "CARE_WORKER", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
                 () -> controller.uploadPhoto(photo(), 201L));
 
         assertEquals(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE, error.getErrorCode());
-        verify(service).assertCurrentCareWorkerMayUpload(201L);
+        verify(service).assertCurrentMayUploadEvidence(201L);
         assertNoStoredFiles(appStorageRoot);
     }
 
@@ -55,28 +55,65 @@ class FileUploadControllerTest {
     @DisplayName("护工缺少工单编号时在调用授权服务与保存文件前被拒绝")
     void careWorkerUploadRequiresWorkOrderIdBeforeSavingFile(@TempDir Path appStorageRoot) throws IOException {
         WorkOrderService service = mock(WorkOrderService.class);
-        FileUploadController controller = new FileUploadController(service, appStorageRoot.toString());
+        FileUploadController controller = controller(service, appStorageRoot);
         UserContext.set(user("77", "CARE_WORKER", "1"));
 
         BusinessException error = assertThrows(BusinessException.class,
                 () -> controller.uploadPhoto(photo(), null));
 
         assertEquals(ErrorCode.VALIDATION_FAILED, error.getErrorCode());
-        verify(service, never()).assertCurrentCareWorkerMayUpload(any());
+        verify(service, never()).assertCurrentMayUploadEvidence(any());
         assertNoStoredFiles(appStorageRoot);
     }
 
     @Test
     @DisplayName("原有社区管理员上传继续兼容且照片写入配置的存储根目录")
-    void administratorUploadUsesConfiguredAppStorageRoot(@TempDir Path appStorageRoot) throws IOException {
+    void administratorBoundUploadUsesConfiguredAppStorageRoot(@TempDir Path appStorageRoot) throws IOException {
         WorkOrderService service = mock(WorkOrderService.class);
-        FileUploadController controller = new FileUploadController(service, appStorageRoot.toString());
+        FileUploadController controller = controller(service, appStorageRoot);
         UserContext.set(user("10", "COMMUNITY_ADMIN", "1"));
 
-        assertDoesNotThrow(() -> controller.uploadPhoto(photo(), null));
-        verify(service, never()).assertCurrentCareWorkerMayUpload(any());
+        assertDoesNotThrow(() -> controller.uploadPhoto(validPhoto(), 201L));
+        verify(service).assertCurrentMayUploadEvidence(201L);
 
         assertEquals(1L, countStoredFiles(appStorageRoot));
+    }
+
+    @Test
+    void rejectsForgedJpegContent(@TempDir Path storage) throws IOException {
+        UserContext.set(user("10", "COMMUNITY_ADMIN", "1"));
+        FileUploadController controller = controller(mock(WorkOrderService.class), storage);
+        assertThrows(BusinessException.class, () -> controller.uploadPhoto(photo(), 201L));
+        assertNoStoredFiles(storage);
+    }
+
+    @Test
+    void anonymousCannotReadEvenKnownPhotoName(@TempDir Path storage) throws IOException {
+        Files.write(storage.resolve("known.jpg"), new byte[]{1, 2, 3});
+        FileUploadController controller = controller(mock(WorkOrderService.class), storage);
+        assertThrows(RuntimeException.class, () -> controller.viewPhoto("known.jpg"));
+    }
+
+    @Test
+    void administratorMustBindUploadToWorkOrder(@TempDir Path storage) {
+        UserContext.set(user("10", "COMMUNITY_ADMIN", "1"));
+        FileUploadController controller = controller(mock(WorkOrderService.class), storage);
+        assertThrows(BusinessException.class, () -> controller.uploadPhoto(photo(), null));
+    }
+
+    private FileUploadController controller(WorkOrderService orders, Path root) {
+        var repo = mock(cn.communityelderly.modules.order.service.FileEvidenceRepository.class);
+        org.mockito.Mockito.when(repo.create(any(), any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyLong(), any(), any())).thenReturn(11L);
+        var service = new cn.communityelderly.modules.order.service.FileEvidenceService(repo,
+                mock(cn.communityelderly.modules.order.service.FileEvidenceRejectionAudit.class),
+                mock(cn.communityelderly.modules.audit.service.AuditLogService.class), new com.fasterxml.jackson.databind.ObjectMapper(), root.toString());
+        return new FileUploadController(orders, service);
+    }
+
+    private MockMultipartFile validPhoto() throws IOException {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_RGB), "jpeg", bytes);
+        return new MockMultipartFile("file", "evidence.jpg", "image/jpeg", bytes.toByteArray());
     }
 
     private void assertNoStoredFiles(Path appStorageRoot) throws IOException {

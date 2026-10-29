@@ -1,4 +1,136 @@
-import { http } from './http'
+import { http, type ApiResponse } from './http'
+
+type PendingIdempotencyKey = { fingerprint: string; key: string }
+
+const pendingIdempotencyKeys = new Map<string, PendingIdempotencyKey>()
+
+function stableSerialize(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .filter(key => record[key] !== undefined && typeof record[key] !== 'function' && typeof record[key] !== 'symbol')
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+    .join(',')}}`
+}
+
+function currentActorScope(): string {
+  if (typeof localStorage === 'undefined') return 'anonymous'
+  try {
+    const user = JSON.parse(localStorage.getItem('user') || 'null') as { userId?: unknown } | null
+    return user?.userId == null ? 'anonymous' : `user:${String(user.userId)}`
+  } catch {
+    return 'anonymous'
+  }
+}
+
+function fingerprintRequest(method: string, endpoint: string, body: unknown): string {
+  const serialized = `${currentActorScope()}\n${method}\n${endpoint}\n${stableSerialize(body)}`
+  let hash1 = 2166136261
+  let hash2 = 2246822519
+  let hash3 = 3266489917
+  let hash4 = 668265263
+
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index)
+    hash1 = Math.imul(hash1 ^ code, 0x01000193)
+    hash2 = Math.imul(hash2 ^ code, 0x85ebca6b)
+    hash3 = Math.imul(hash3 ^ code, 0xc2b2ae35)
+    hash4 = Math.imul(hash4 ^ code, 0x27d4eb2d)
+  }
+
+  return [hash1, hash2, hash3, hash4].map(hash => (hash >>> 0).toString(16).padStart(8, '0')).join('')
+}
+
+function createIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+}
+
+function clearPendingIdempotencyKeys(): void {
+  pendingIdempotencyKeys.clear()
+}
+
+function shouldRetainPendingKey(error: unknown): boolean {
+  const apiError = error as { status?: unknown; code?: unknown }
+  if (apiError?.code === 'API_BASE_URL_MISSING') return false
+
+  const status = typeof apiError?.status === 'number' ? apiError.status : undefined
+  if (status === undefined || status === 0) return true
+  // Server-side idempotency releases owned 4xx reservations; same-key retry is safe, while changed bodies rotate the key.
+  return status >= 200
+}
+
+function withPendingIdempotencyKey<T>(
+  method: 'POST' | 'PUT',
+  endpoint: string,
+  body: unknown,
+  send: (key: string) => Promise<T>,
+  retainKeyOnSuccess = false,
+): Promise<T> {
+  const operation = `${method} ${endpoint}`
+  const fingerprint = fingerprintRequest(method, endpoint, body)
+  const previous = pendingIdempotencyKeys.get(operation)
+  const key = previous?.fingerprint === fingerprint ? previous.key : createIdempotencyKey()
+  const pending = { fingerprint, key }
+  pendingIdempotencyKeys.set(operation, pending)
+
+  const clearPending = () => {
+    if (pendingIdempotencyKeys.get(operation) === pending) pendingIdempotencyKeys.delete(operation)
+  }
+
+  let request: Promise<T>
+  try {
+    request = send(key)
+  } catch (error) {
+    if (!shouldRetainPendingKey(error)) clearPending()
+    return Promise.reject(error)
+  }
+
+  return request.then(
+    response => {
+      if (!retainKeyOnSuccess) clearPending()
+      return response
+    },
+    error => {
+      if (!shouldRetainPendingKey(error)) clearPending()
+      throw error
+    },
+  )
+}
+
+export function clearPendingIdempotencyKey(method: 'POST' | 'PUT', endpoint: string, body?: unknown): void {
+  const operation = `${method} ${endpoint}`
+  const pending = pendingIdempotencyKeys.get(operation)
+  if (pending?.fingerprint === fingerprintRequest(method, endpoint, body)) {
+    pendingIdempotencyKeys.delete(operation)
+  }
+}
+
+function postWithIdempotencyKey<T = unknown>(
+  endpoint: string,
+  body?: unknown,
+  retainKeyOnSuccess = false,
+): Promise<ApiResponse<T>> {
+  return withPendingIdempotencyKey('POST', endpoint, body, key =>
+    http.post<T>(endpoint, body, { 'Idempotency-Key': key }),
+    retainKeyOnSuccess,
+  )
+}
+
+function putWithIdempotencyKey<T = unknown>(
+  endpoint: string,
+  body?: unknown,
+  retainKeyOnSuccess = false,
+): Promise<ApiResponse<T>> {
+  return withPendingIdempotencyKey('PUT', endpoint, body, key =>
+    http.put<T>(endpoint, body, { 'Idempotency-Key': key }),
+    retainKeyOnSuccess,
+  )
+}
 
 export interface AdminLoginResponse {
   userId: number
@@ -75,12 +207,15 @@ export interface WorkOrder7DayTrendVO {
   dispatchedCounts: Array<number | null> | null
   closedCounts: Array<number | null> | null
   avgResponseMinutes: Array<number | null> | null
+  acceptedCounts: Array<number | null> | null
+  unacceptedCounts: Array<number | null> | null
 }
 
 export interface DashboardChartsVO {
   diseaseDistribution: DiseaseDistributionVO[] | null
   serviceStructure: ServiceStructureVO[] | null
   workOrderTrend: WorkOrder7DayTrendVO | null
+  workOrderTrendByCategory: Record<'ORDINARY' | 'SOS', WorkOrder7DayTrendVO> | null
 }
 
 export interface RealtimeAlertFeedVO {
@@ -106,7 +241,7 @@ export const adminApi = {
     return http.get<AdminCurrentUser>('/auth/current-user')
   },
   logout() {
-    return http.post('/auth/logout')
+    return http.post('/auth/logout').finally(clearPendingIdempotencyKeys)
   },
 
   // M01 社区工作人员账号与角色管理
@@ -114,10 +249,10 @@ export const adminApi = {
     return http.get<StaffSummary[]>('/admin/staff')
   },
   createStaff(data: StaffCreateRequest) {
-    return http.post<StaffSummary>('/admin/staff', data, { 'Idempotency-Key': crypto.randomUUID() })
+    return postWithIdempotencyKey<StaffSummary>('/admin/staff', data)
   },
   replaceStaffRoles(userId: number, data: StaffRolesUpdateRequest) {
-    return http.put<StaffSummary>(`/admin/staff/${userId}/roles`, data, { 'Idempotency-Key': crypto.randomUUID() })
+    return putWithIdempotencyKey<StaffSummary>(`/admin/staff/${userId}/roles`, data, true)
   },
 
   // M02 老人档案 (P-03 / P-04)
@@ -193,10 +328,10 @@ export const adminApi = {
     return http.get(`/emergency/sos/list${status ? '?status=' + status : ''}`)
   },
   dispatchSos(sosId: number, data: { assigneeId: number; dispatchReason?: string }) {
-    return http.post(`/emergency/sos/${sosId}/dispatch`, data)
+    return postWithIdempotencyKey(`/emergency/sos/${sosId}/dispatch`, data, true)
   },
   closeSos(sosId: number, data: { resultSummary: string; isFalseAlarm?: boolean }) {
-    return http.post(`/emergency/sos/${sosId}/close`, data)
+    return postWithIdempotencyKey(`/emergency/sos/${sosId}/close`, data, true)
   },
 
   // M09 社区态势感知大屏
@@ -222,30 +357,30 @@ export const adminApi = {
     return http.get(`/work-orders/my-tasks${status ? '?status=' + status : ''}`)
   },
   acceptWorkOrder(workOrderId: number) {
-    return http.post(`/work-orders/${workOrderId}/accept`)
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/accept`, undefined, true)
   },
   startWorkOrder(workOrderId: number) {
-    return http.post(`/work-orders/${workOrderId}/start`)
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/start`, undefined, true)
   },
   getWorkOrderDetail(workOrderId: number) {
     return http.get(`/work-orders/${workOrderId}`)
   },
   dispatchWorkOrder(workOrderId: number, data: { assigneeId: number; dispatchNotes?: string }) {
-    return http.post(`/work-orders/${workOrderId}/dispatch`, data)
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/dispatch`, data)
   },
-  submitWorkOrderResult(workOrderId: number, data: { resultSummary: string; photoUrls?: string[]; isExemptPhoto?: boolean; photoExemptionReason?: string }) {
-    return http.post(`/work-orders/${workOrderId}/execution/submit`, data)
+  submitWorkOrderResult(workOrderId: number, data: { resultSummary: string; evidenceAssetUuids?: string[]; photoUrls?: string[]; isExemptPhoto?: boolean; photoExemptionReason?: string }) {
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/execution/submit`, data, true)
   },
   reviewWorkOrder(workOrderId: number, data: { action: string; reviewComment?: string }) {
-    return http.post(`/work-orders/${workOrderId}/review`, data)
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/review`, data, true)
   },
 
   // 文件上传 (工单履约凭据照片)
-  uploadPhotoEvidence(file: File, workOrderId?: number) {
+  uploadPhotoEvidence(file: File, workOrderId: number) {
     const formData = new FormData()
     formData.append('file', file)
     if (workOrderId !== undefined) formData.append('workOrderId', String(workOrderId))
-    return http.request<{ url: string; fileName: string; size: number }>('/files/upload', {
+    return http.request<{ url: string; filename: string; assetUuid: string }>('/files/upload', {
       method: 'POST',
       body: formData,
     })
@@ -339,6 +474,6 @@ export const adminApi = {
     return http.get(`/health/alerts/${alertId}`)
   },
   dispatchWorkOrderToWorker(workOrderId: number, data: { assigneeUserId: number; reason?: string }) {
-    return http.post(`/work-orders/${workOrderId}/dispatch`, data)
+    return postWithIdempotencyKey(`/work-orders/${workOrderId}/dispatch`, data, true)
   },
 }

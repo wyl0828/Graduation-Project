@@ -18,6 +18,7 @@ import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.elder.service.ElderArchiveService;
 import cn.communityelderly.modules.elder.service.KinshipService;
 import cn.communityelderly.modules.elder.service.impl.ElderArchiveServiceImpl;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import cn.communityelderly.modules.emergency.dto.SosCancelDTO;
 import cn.communityelderly.modules.emergency.dto.SosTriggerDTO;
 import cn.communityelderly.modules.emergency.entity.SosEvent;
@@ -125,7 +126,8 @@ class ObjectAuthorizationServiceTest {
         ElderActivationTicketMapper activationMapper = mock(ElderActivationTicketMapper.class);
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
-        ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper, activationMapper, policy);
+        ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper, activationMapper, policy,
+                mock(WorkOrderService.class));
         ElderCreateDTO dto = new ElderCreateDTO();
         dto.setName("测试老人");
         dto.setAddress("测试地址");
@@ -147,7 +149,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         ElderCreateDTO dto = new ElderCreateDTO();
         dto.setName("测试老人");
         dto.setAddress("测试地址");
@@ -170,7 +172,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         UserContext.set(new CurrentUser("10", "13800000010", "STAFF",
                 List.of("COMMUNITY_ADMIN"), "COMMUNITY_ADMIN", "2"));
         Page<ElderProfile> dbPage = new Page<>(3, 10);
@@ -198,7 +200,7 @@ class ObjectAuthorizationServiceTest {
         ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderArchiveServiceImpl service = new ElderArchiveServiceImpl(elderMapper,
                 mock(ElderActivationTicketMapper.class), new ObjectAuthorizationPolicy(elderMapper,
-                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)));
+                mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class)), mock(WorkOrderService.class));
         when(elderMapper.selectById(77L)).thenReturn(elderProfile(77L, 3L));
         UserContext.set(new CurrentUser("10", "13800000010", "STAFF",
                 List.of("COMMUNITY_ADMIN"), "COMMUNITY_ADMIN", "2"));
@@ -324,18 +326,39 @@ class ObjectAuthorizationServiceTest {
     @DisplayName("FROZEN 亲情关系明确拒绝，保留冻结状态的 403 契约")
     void frozenKinshipIsRejected() {
         ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
+        ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
         ElderFamilyLink frozen = new ElderFamilyLink();
         frozen.setElderId(2L);
         frozen.setChildUserId(44L);
         frozen.setStatus("FROZEN");
         when(familyMapper.selectOne(any(Wrapper.class))).thenReturn(frozen);
-        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(mock(ElderProfileMapper.class),
+        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
                 mock(ElderIdentityLinkMapper.class), familyMapper);
         UserContext.set(new CurrentUser("44", "13800000044", "FAMILY", List.of("CHILD"), "CHILD", "1"));
 
         BusinessException error = assertThrows(BusinessException.class, () -> policy.requireActiveChildLink(2L));
 
         assertEquals(ErrorCode.KINSHIP_NOT_ACTIVE, error.getErrorCode());
+    }
+
+    @Test
+    @DisplayName("UNLINKED 亲情关系按不可访问资源返回 404，且不读取老人档案")
+    void unlinkedKinshipIsHiddenAsInaccessible() {
+        ElderFamilyLinkMapper familyMapper = mock(ElderFamilyLinkMapper.class);
+        ElderProfileMapper elderMapper = mock(ElderProfileMapper.class);
+        ElderFamilyLink unlinked = new ElderFamilyLink();
+        unlinked.setElderId(2L);
+        unlinked.setChildUserId(44L);
+        unlinked.setStatus("UNLINKED");
+        when(familyMapper.selectOne(any(Wrapper.class))).thenReturn(unlinked);
+        ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(elderMapper,
+                mock(ElderIdentityLinkMapper.class), familyMapper);
+        UserContext.set(new CurrentUser("44", "13800000044", "FAMILY", List.of("CHILD"), "CHILD", "1"));
+
+        BusinessException error = assertThrows(BusinessException.class, () -> policy.requireActiveChildLink(2L));
+
+        assertEquals(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE, error.getErrorCode());
+        verify(elderMapper, never()).selectById(anyLong());
     }
 
     @Test

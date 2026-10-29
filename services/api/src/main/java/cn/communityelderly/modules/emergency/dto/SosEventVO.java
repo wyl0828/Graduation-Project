@@ -22,6 +22,7 @@ public class SosEventVO {
     private String contactPhone;
     private LocalDateTime occurredAt;
     private String cancelReason;
+    private Boolean elderInactiveAtAcceptance;
 
     public Long getSosId() {
         return sosId;
@@ -165,5 +166,13 @@ public class SosEventVO {
 
     public void setCancelReason(String cancelReason) {
         this.cancelReason = cancelReason;
+    }
+
+    public Boolean getElderInactiveAtAcceptance() {
+        return elderInactiveAtAcceptance;
+    }
+
+    public void setElderInactiveAtAcceptance(Boolean elderInactiveAtAcceptance) {
+        this.elderInactiveAtAcceptance = elderInactiveAtAcceptance;
     }
 }

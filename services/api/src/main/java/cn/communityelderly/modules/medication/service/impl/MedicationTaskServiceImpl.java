@@ -6,6 +6,7 @@ import cn.communityelderly.common.security.ObjectAuthorizationPolicy;
 import cn.communityelderly.modules.elder.entity.ElderFamilyLink;
 import cn.communityelderly.modules.elder.entity.ElderProfile;
 import cn.communityelderly.modules.elder.mapper.ElderFamilyLinkMapper;
+import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.medication.dto.MedicationCheckinDTO;
 import cn.communityelderly.modules.medication.dto.MedicationTaskVO;
 import cn.communityelderly.modules.medication.entity.*;
@@ -14,15 +15,19 @@ import cn.communityelderly.modules.medication.service.MedicationTaskService;
 import cn.communityelderly.modules.notification.dto.NotificationCreateEventDTO;
 import cn.communityelderly.modules.notification.service.NotificationService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -34,9 +39,49 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
     private final MedicationPlanVersionMapper versionMapper;
     private final MedicationPlanReminderTimeMapper reminderTimeMapper;
     private final ElderFamilyLinkMapper familyLinkMapper;
+    private final ElderProfileMapper elderProfileMapper;
     private final ObjectAuthorizationPolicy authorizationPolicy;
     private final NotificationService notificationService;
+    private final Clock clock;
 
+    @Autowired
+    public MedicationTaskServiceImpl(MedicationTaskMapper taskMapper,
+                                     MedicationCheckinMapper checkinMapper,
+                                     MedicationPlanMapper planMapper,
+                                     MedicationPlanVersionMapper versionMapper,
+                                     MedicationPlanReminderTimeMapper reminderTimeMapper,
+                                     ElderFamilyLinkMapper familyLinkMapper,
+                                     ElderProfileMapper elderProfileMapper,
+                                     ObjectAuthorizationPolicy authorizationPolicy,
+                                     NotificationService notificationService,
+                                     Clock clock) {
+        this.taskMapper = taskMapper;
+        this.checkinMapper = checkinMapper;
+        this.planMapper = planMapper;
+        this.versionMapper = versionMapper;
+        this.reminderTimeMapper = reminderTimeMapper;
+        this.familyLinkMapper = familyLinkMapper;
+        this.elderProfileMapper = elderProfileMapper;
+        this.authorizationPolicy = authorizationPolicy;
+        this.notificationService = notificationService;
+        this.clock = clock;
+    }
+
+    /** Compatibility for direct constructions outside Spring. */
+    public MedicationTaskServiceImpl(MedicationTaskMapper taskMapper,
+                                     MedicationCheckinMapper checkinMapper,
+                                     MedicationPlanMapper planMapper,
+                                     MedicationPlanVersionMapper versionMapper,
+                                     MedicationPlanReminderTimeMapper reminderTimeMapper,
+                                     ElderFamilyLinkMapper familyLinkMapper,
+                                     ObjectAuthorizationPolicy authorizationPolicy,
+                                     NotificationService notificationService,
+                                     Clock clock) {
+        this(taskMapper, checkinMapper, planMapper, versionMapper, reminderTimeMapper, familyLinkMapper,
+                null, authorizationPolicy, notificationService, clock);
+    }
+
+    /** Compatibility for direct constructions outside Spring; runtime wiring uses the Clock bean. */
     public MedicationTaskServiceImpl(MedicationTaskMapper taskMapper,
                                      MedicationCheckinMapper checkinMapper,
                                      MedicationPlanMapper planMapper,
@@ -45,14 +90,8 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
                                      ElderFamilyLinkMapper familyLinkMapper,
                                      ObjectAuthorizationPolicy authorizationPolicy,
                                      NotificationService notificationService) {
-        this.taskMapper = taskMapper;
-        this.checkinMapper = checkinMapper;
-        this.planMapper = planMapper;
-        this.versionMapper = versionMapper;
-        this.reminderTimeMapper = reminderTimeMapper;
-        this.familyLinkMapper = familyLinkMapper;
-        this.authorizationPolicy = authorizationPolicy;
-        this.notificationService = notificationService;
+        this(taskMapper, checkinMapper, planMapper, versionMapper, reminderTimeMapper, familyLinkMapper,
+                authorizationPolicy, notificationService, Clock.system(ZoneId.of("Asia/Shanghai")));
     }
 
     @Override
@@ -63,10 +102,12 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
             authorizationPolicy.requireRole("ELDER");
             resolvedElderId = authorizationPolicy.requireElderIdentityId();
         }
-        ElderProfile elder = authorizationPolicy.requireElderAccess(resolvedElderId);
+        authorizationPolicy.requireElderAccess(resolvedElderId);
+        ElderProfile elder = lockElder(resolvedElderId);
 
-        LocalDate today = LocalDate.now();
-        LocalTime nowTime = LocalTime.now();
+        LocalDateTime now = LocalDateTime.now(clock);
+        LocalDate today = now.toLocalDate();
+        LocalTime nowTime = now.toLocalTime();
 
         // 1. 查询今日已存在任务
         List<MedicationTask> tasks = taskMapper.selectList(
@@ -76,41 +117,52 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
                         .orderByAsc(MedicationTask::getScheduledTime)
         );
 
-        // 2. 如果今日尚未为所有活跃 plan 生成任务快照，就地补充生成
-        List<MedicationPlan> activePlans = planMapper.selectList(
-                new LambdaQueryWrapper<MedicationPlan>()
-                        .eq(MedicationPlan::getElderId, resolvedElderId)
-                        .eq(MedicationPlan::getStatus, "ACTIVE")
-        );
+        boolean elderActive = "ACTIVE".equalsIgnoreCase(elder.getStatus());
 
-        for (MedicationPlan plan : activePlans) {
-            boolean hasTasks = tasks.stream().anyMatch(t -> t.getPlanId().equals(plan.getPlanId()));
-            if (!hasTasks) {
-                // 读取当前版本的时段
+        if (elderActive) {
+            // 档案停用期间保留今日已有任务，但不生成缺失时段。
+            List<MedicationPlan> activePlans = planMapper.selectList(
+                    new LambdaQueryWrapper<MedicationPlan>()
+                            .eq(MedicationPlan::getElderId, resolvedElderId)
+                            .eq(MedicationPlan::getStatus, "ACTIVE")
+            );
+
+            for (MedicationPlan plan : activePlans) {
                 MedicationPlanVersion currentVer = versionMapper.selectOne(
                         new LambdaQueryWrapper<MedicationPlanVersion>()
                                 .eq(MedicationPlanVersion::getPlanId, plan.getPlanId())
                                 .eq(MedicationPlanVersion::getVersionNo, plan.getCurrentVersionNo())
                 );
-                if (currentVer != null && !currentVer.getStartDate().isAfter(today)) {
-                    List<MedicationPlanReminderTime> times = reminderTimeMapper.selectList(
-                            new LambdaQueryWrapper<MedicationPlanReminderTime>()
-                                    .eq(MedicationPlanReminderTime::getVersionId, currentVer.getVersionId())
-                    );
-                    for (MedicationPlanReminderTime t : times) {
-                        MedicationTask task = new MedicationTask();
-                        task.setElderId(resolvedElderId);
-                        task.setPlanId(plan.getPlanId());
-                        task.setVersionNo(currentVer.getVersionNo());
-                        task.setTaskDate(today);
-                        task.setScheduledTime(t.getReminderTime());
-                        task.setMedicineName(plan.getMedicineName());
-                        task.setDosage(currentVer.getDosage());
-                        task.setStatus("PENDING");
-                        task.setCreatedAt(LocalDateTime.now());
-                        taskMapper.insert(task);
-                        tasks.add(task);
+                if (currentVer == null || currentVer.getStartDate() == null
+                        || currentVer.getStartDate().isAfter(today)
+                        || (currentVer.getEndDate() != null && currentVer.getEndDate().isBefore(today))) {
+                    continue;
+                }
+
+                List<MedicationPlanReminderTime> times = reminderTimeMapper.selectList(
+                        new LambdaQueryWrapper<MedicationPlanReminderTime>()
+                                .eq(MedicationPlanReminderTime::getVersionId, currentVer.getVersionId())
+                );
+                for (MedicationPlanReminderTime t : times) {
+                    boolean slotExists = tasks.stream().anyMatch(existing ->
+                            Objects.equals(existing.getPlanId(), plan.getPlanId())
+                                    && Objects.equals(existing.getScheduledTime(), t.getReminderTime()));
+                    if (slotExists) {
+                        continue;
                     }
+
+                    MedicationTask task = new MedicationTask();
+                    task.setElderId(resolvedElderId);
+                    task.setPlanId(plan.getPlanId());
+                    task.setVersionNo(currentVer.getVersionNo());
+                    task.setTaskDate(today);
+                    task.setScheduledTime(t.getReminderTime());
+                    task.setMedicineName(plan.getMedicineName());
+                    task.setDosage(currentVer.getDosage());
+                    task.setStatus("PENDING");
+                    task.setCreatedAt(now);
+                    taskMapper.insert(task);
+                    tasks.add(task);
                 }
             }
         }
@@ -126,8 +178,10 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
                     t.setStatus("OVER_WINDOW_UNCONFIRMED");
                     taskMapper.updateById(t);
 
-                    // 触发发布通知给关联的有效子女
-                    publishTimeoutCareNotification(t, elder);
+                    // 档案停用时保留未确认过窗状态，但暂停新的关怀提醒。
+                    if (elderActive) {
+                        publishTimeoutCareNotification(t, elder);
+                    }
                 }
             } else if ("OVER_WINDOW_UNCONFIRMED".equalsIgnoreCase(t.getStatus())) {
                 isOverWindow = true;
@@ -149,7 +203,8 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
             throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
         }
 
-        ElderProfile elder = authorizationPolicy.requireElderAccess(task.getElderId());
+        authorizationPolicy.requireElderAccess(task.getElderId());
+        ElderProfile elder = lockElder(task.getElderId());
         String elderName = elder.getName();
 
         // 1. 幂等检查 (BR-07)
@@ -166,7 +221,7 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
             return convertToVO(task, elderName, false);
         }
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(clock);
 
         // 2. 插入打卡流水记录
         MedicationCheckin checkin = new MedicationCheckin();
@@ -208,6 +263,16 @@ public class MedicationTaskServiceImpl implements MedicationTaskService {
         notify.setRecipientUserIds(childUserIds);
 
         notificationService.publishEvent(notify);
+    }
+
+    private ElderProfile lockElder(Long elderId) {
+        ElderProfile elder = elderProfileMapper == null
+                ? authorizationPolicy.requireElderAccess(elderId)
+                : elderProfileMapper.selectByIdForUpdate(elderId);
+        if (elder == null) {
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND_OR_NOT_ACCESSIBLE);
+        }
+        return elder;
     }
 
     private MedicationTaskVO convertToVO(MedicationTask t, String elderName, boolean isOverWindow) {

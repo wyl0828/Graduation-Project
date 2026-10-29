@@ -1,5 +1,125 @@
 import { uniHttp, type ApiResponse } from './http'
 
+type PendingIdempotencyKey = { fingerprint: string; key: string; suppliedKey?: string }
+
+const pendingIdempotencyKeys = new Map<string, PendingIdempotencyKey>()
+
+function stableSerialize(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .filter(key => record[key] !== undefined && typeof record[key] !== 'function' && typeof record[key] !== 'symbol')
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+    .join(',')}}`
+}
+
+function currentActorScope(): string {
+  try {
+    const user = uni.getStorageSync('user') as { userId?: unknown } | null
+    return user?.userId == null ? 'anonymous' : `user:${String(user.userId)}`
+  } catch {
+    return 'anonymous'
+  }
+}
+
+function fingerprintRequest(method: string, endpoint: string, body: unknown): string {
+  const serialized = `${currentActorScope()}\n${method}\n${endpoint}\n${stableSerialize(body)}`
+  let hash1 = 2166136261
+  let hash2 = 2246822519
+  let hash3 = 3266489917
+  let hash4 = 668265263
+
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index)
+    hash1 = Math.imul(hash1 ^ code, 0x01000193)
+    hash2 = Math.imul(hash2 ^ code, 0x85ebca6b)
+    hash3 = Math.imul(hash3 ^ code, 0xc2b2ae35)
+    hash4 = Math.imul(hash4 ^ code, 0x27d4eb2d)
+  }
+
+  return [hash1, hash2, hash3, hash4].map(hash => (hash >>> 0).toString(16).padStart(8, '0')).join('')
+}
+
+function createIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+}
+
+function clearPendingIdempotencyKeys(): void {
+  pendingIdempotencyKeys.clear()
+}
+
+function shouldRetainPendingKey(error: unknown): boolean {
+  const apiError = error as { status?: unknown; statusCode?: unknown; code?: unknown }
+  if (apiError?.code === 'API_BASE_URL_MISSING') return false
+
+  const status = typeof apiError?.status === 'number'
+    ? apiError.status
+    : typeof apiError?.statusCode === 'number'
+      ? apiError.statusCode
+      : undefined
+  if (status === undefined || status === 0) return true
+  // Server-side idempotency releases owned 4xx reservations; same-key retry is safe, while changed bodies rotate the key.
+  return status >= 200
+}
+
+function withPendingIdempotencyKey<T>(
+  method: 'POST' | 'PUT',
+  endpoint: string,
+  body: unknown,
+  send: (key: string) => Promise<T>,
+  suppliedKey?: string,
+): Promise<T> {
+  const operation = `${method} ${endpoint}`
+  const fingerprint = fingerprintRequest(method, endpoint, body)
+  const previous = pendingIdempotencyKeys.get(operation)
+  const normalizedSuppliedKey = suppliedKey?.trim()
+  const samePendingBody = previous?.fingerprint === fingerprint
+  const key = samePendingBody
+    ? normalizedSuppliedKey && normalizedSuppliedKey !== previous.key && normalizedSuppliedKey !== previous.suppliedKey
+      ? normalizedSuppliedKey
+      : previous.key
+    : normalizedSuppliedKey && previous?.key === normalizedSuppliedKey
+      ? createIdempotencyKey()
+      : normalizedSuppliedKey || createIdempotencyKey()
+  const pending = { fingerprint, key, suppliedKey: normalizedSuppliedKey }
+  pendingIdempotencyKeys.set(operation, pending)
+
+  const clearPending = () => {
+    if (pendingIdempotencyKeys.get(operation) === pending) pendingIdempotencyKeys.delete(operation)
+  }
+
+  let request: Promise<T>
+  try {
+    request = send(key)
+  } catch (error) {
+    if (!shouldRetainPendingKey(error)) clearPending()
+    return Promise.reject(error)
+  }
+
+  return request.then(
+    response => {
+      clearPending()
+      return response
+    },
+    error => {
+      if (!shouldRetainPendingKey(error)) clearPending()
+      throw error
+    },
+  )
+}
+
+function postWithIdempotencyKey<T = any>(endpoint: string, body?: unknown, suppliedKey?: string): Promise<ApiResponse<T>> {
+  return withPendingIdempotencyKey('POST', endpoint, body, key =>
+    uniHttp.post<T>(endpoint, body, { 'Idempotency-Key': key }),
+    suppliedKey,
+  )
+}
+
 export const elderApi = {
   // M01 认证
   login(phone: string, password: string, clientType = 'MINIAPP') {
@@ -12,7 +132,7 @@ export const elderApi = {
     return uniHttp.get('/auth/current-user')
   },
   logout(): Promise<ApiResponse<void>> {
-    return uniHttp.post<void>('/auth/logout')
+    return uniHttp.post<void>('/auth/logout').finally(clearPendingIdempotencyKeys)
   },
   switchRole(targetRoleCode: string) {
     return uniHttp.post('/auth/switch-role', { targetRoleCode })
@@ -80,10 +200,11 @@ export const elderApi = {
 
   // M05 SOS 应急呼叫与求助 (P-14)
   triggerSos(data: { elderId?: number; pressDurationMs: number; locationAddress?: string; longitude?: number; latitude?: number; idempotencyKey?: string }) {
-    return uniHttp.post('/emergency/sos/trigger', data)
+    const { idempotencyKey, ...requestBody } = data
+    return postWithIdempotencyKey('/emergency/sos/trigger', requestBody, idempotencyKey)
   },
-  cancelSosByElder(sosId: number, cancelReason: string) {
-    return uniHttp.post(`/emergency/sos/${sosId}/cancel`, { cancelReason })
+  cancelSosByElder(sosId: number, cancelReason: string, idempotencyKey?: string) {
+    return postWithIdempotencyKey(`/emergency/sos/${sosId}/cancel`, { cancelReason }, idempotencyKey)
   },
   getActiveSos(elderId?: number) {
     return uniHttp.get('/emergency/sos/active', elderId ? { elderId } : undefined)
@@ -106,7 +227,8 @@ export const elderApi = {
     return uniHttp.get(`/medication/tasks/today/${elderId}`)
   },
   checkinMedication(data: { taskId: number; checkinMode?: string; idempotencyKey?: string }) {
-    return uniHttp.post('/medication/tasks/checkin', data)
+    const { idempotencyKey, ...requestBody } = data
+    return postWithIdempotencyKey('/medication/tasks/checkin', requestBody, idempotencyKey)
   },
   getMedicationCompliance(elderId: number, days = 30) {
     return uniHttp.get(`/medication/compliance/${elderId}`, { days })
@@ -117,7 +239,7 @@ export const elderApi = {
     return uniHttp.get('/service-catalogs')
   },
   createReservation(data: { elderId: number; serviceType: string; serviceDate: string; slotCode: string; serviceAddress: string; specialNotes?: string }) {
-    return uniHttp.post('/service-reservations', data)
+    return postWithIdempotencyKey('/service-reservations', data)
   },
   getMyReservations(elderId?: number) {
     return uniHttp.get('/service-reservations/my', elderId ? { elderId } : undefined)
@@ -126,7 +248,7 @@ export const elderApi = {
     return uniHttp.get(`/service-reservations/${reservationId}`)
   },
   cancelReservation(reservationId: number, reason: string) {
-    return uniHttp.post(`/service-reservations/${reservationId}/cancel`, { reason })
+    return postWithIdempotencyKey(`/service-reservations/${reservationId}/cancel`, { reason })
   },
   getWorkOrderTimeline(orderId: number) {
     return uniHttp.get(`/work-orders/${orderId}`)

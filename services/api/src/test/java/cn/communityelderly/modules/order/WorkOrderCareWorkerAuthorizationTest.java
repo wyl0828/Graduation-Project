@@ -21,18 +21,24 @@ import cn.communityelderly.modules.emergency.entity.WorkOrderActionHistory;
 import cn.communityelderly.modules.emergency.entity.WorkOrderAssignmentHistory;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderActionHistoryMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderAssignmentHistoryMapper;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderHandoffMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderMapper;
 import cn.communityelderly.modules.order.dto.WorkOrderDispatchDTO;
 import cn.communityelderly.modules.order.dto.WorkOrderExecutionDTO;
 import cn.communityelderly.modules.order.dto.WorkOrderVO;
+import cn.communityelderly.modules.order.mapper.ServiceStopRequestMapper;
 import cn.communityelderly.modules.order.service.impl.WorkOrderServiceImpl;
+import cn.communityelderly.modules.notification.service.NotificationService;
 import cn.communityelderly.modules.reservation.mapper.ReservationExecutionLinkMapper;
 import cn.communityelderly.modules.reservation.mapper.ServiceReservationMapper;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -153,7 +159,7 @@ class WorkOrderCareWorkerAuthorizationTest {
 
         assertEquals("PENDING_RESULT_REVIEW", order.getStatus());
         assertEquals("已完成现场照护", order.getServiceResultSummary());
-        assertEquals("/api/v1/files/view/evidence.jpg", order.getPhotoUrls());
+        assertEquals(null, order.getPhotoUrls());
         verify(fixture.workOrderMapper).updateById(order);
         verify(fixture.actionHistoryMapper).insert(any(WorkOrderActionHistory.class));
     }
@@ -369,6 +375,7 @@ class WorkOrderCareWorkerAuthorizationTest {
         WorkOrder order = workOrder(214L, 22L, COMMUNITY_ID, null, "PENDING_DISPATCH");
         when(fixture.workOrderMapper.selectById(214L)).thenReturn(order);
         when(fixture.elderMapper.selectById(22L)).thenReturn(elder(22L, COMMUNITY_ID));
+        when(fixture.workOrderMapper.updateById(order)).thenReturn(1);
 
         assertDoesNotThrow(() -> fixture.service.dispatchOrder(214L, dispatch(88L), 10L));
 
@@ -436,6 +443,55 @@ class WorkOrderCareWorkerAuthorizationTest {
         verifyDispatchRoleQuery(fixture.userRoleMapper, 88L, COMMUNITY_ID);
     }
 
+    @Test
+    void unverifiedOrCrossOrderPhotoUrlCannotSatisfySubmission() {
+        WorkOrder order = workOrder(905L, 22L, COMMUNITY_ID, CARE_WORKER_ID, "PROCESSING");
+        Fixture fixture = fixture(order);
+        when(fixture.workOrderMapper.selectById(905L)).thenReturn(order);
+        when(fixture.workOrderMapper.updateById(order)).thenReturn(1);
+        assertThrows(BusinessException.class,
+                () -> {
+                    WorkOrderExecutionDTO legacy = new WorkOrderExecutionDTO();
+                    legacy.setResultSummary("旧地址不能作为验证凭据");
+                    legacy.setPhotoUrls(List.of("/api/v1/files/view/evidence.jpg"));
+                    fixture.service.submitExecutionResult(905L, legacy, CARE_WORKER_ID);
+                });
+        verify(fixture.workOrderMapper, never()).updateById(order);
+    }
+
+    @Test
+    void missingEvidenceCannotBeApprovedToClose() {
+        WorkOrder order = workOrder(906L, 22L, COMMUNITY_ID, CARE_WORKER_ID, "PENDING_RESULT_REVIEW");
+        order.setResultPhotoRequired(true);
+        order.setPhotoUrls("/api/v1/files/view/missing.jpg");
+        Fixture fixture = fixture(order);
+        when(fixture.workOrderMapper.selectById(906L)).thenReturn(order);
+        when(fixture.workOrderMapper.updateById(order)).thenReturn(1);
+        UserContext.set(user("10", "COMMUNITY_ADMIN", String.valueOf(COMMUNITY_ID)));
+        cn.communityelderly.modules.order.dto.WorkOrderReviewDTO review = new cn.communityelderly.modules.order.dto.WorkOrderReviewDTO();
+        review.setAction("APPROVE");
+        review.setReviewComment("完成核验");
+        assertThrows(BusinessException.class, () -> fixture.service.reviewWorkOrder(906L, review, 10L));
+        verify(fixture.workOrderMapper, never()).updateById(order);
+    }
+
+    @Test
+    void careWorkerCannotReadEvidenceFromAnotherCurrentAssignee() {
+        WorkOrder order = workOrder(907L, 22L, COMMUNITY_ID, 99L, "PROCESSING");
+        Fixture fixture = fixture(order);
+        when(fixture.workOrderMapper.selectById(907L)).thenReturn(order);
+        assertThrows(BusinessException.class, () -> fixture.service.assertCurrentMayReadEvidence(907L));
+    }
+
+    @Test
+    void unsupportedCurrentRoleCannotReadWorkOrderEvidence() {
+        WorkOrder order = workOrder(908L, 22L, COMMUNITY_ID, CARE_WORKER_ID, "PROCESSING");
+        Fixture fixture = fixture(order);
+        when(fixture.workOrderMapper.selectById(908L)).thenReturn(order);
+        UserContext.set(user("10", "SYSTEM_ADMIN", String.valueOf(COMMUNITY_ID)));
+        assertThrows(BusinessException.class, () -> fixture.service.assertCurrentMayReadEvidence(908L));
+    }
+
     private Fixture fixture(WorkOrder order) {
         Fixture fixture = new Fixture();
         fixture.workOrderMapper = mock(WorkOrderMapper.class);
@@ -447,10 +503,13 @@ class WorkOrderCareWorkerAuthorizationTest {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(fixture.elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
         fixture.service = new WorkOrderServiceImpl(fixture.workOrderMapper, fixture.assignmentHistoryMapper,
-                fixture.actionHistoryMapper, fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
+                fixture.actionHistoryMapper, mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
+                fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
                 mock(ReservationExecutionLinkMapper.class), mock(ServiceReservationMapper.class), policy,
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), mock(NotificationService.class), new ObjectMapper(), mock(cn.communityelderly.modules.order.service.FileEvidenceService.class),
+                Clock.system(ZoneId.of("Asia/Shanghai")));
 
+        when(fixture.workOrderMapper.selectOne(any(Wrapper.class))).thenReturn(order);
         UserContext.set(user(String.valueOf(CARE_WORKER_ID), "CARE_WORKER", String.valueOf(COMMUNITY_ID)));
         when(fixture.userAccountMapper.selectById(CARE_WORKER_ID)).thenReturn(staffAccount(CARE_WORKER_ID));
         when(fixture.userRoleMapper.selectOne(any(Wrapper.class)))
@@ -471,9 +530,11 @@ class WorkOrderCareWorkerAuthorizationTest {
         ObjectAuthorizationPolicy policy = new ObjectAuthorizationPolicy(fixture.elderMapper,
                 mock(ElderIdentityLinkMapper.class), mock(ElderFamilyLinkMapper.class));
         fixture.service = new WorkOrderServiceImpl(fixture.workOrderMapper, fixture.assignmentHistoryMapper,
-                fixture.actionHistoryMapper, fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
+                fixture.actionHistoryMapper, mock(WorkOrderHandoffMapper.class), mock(ServiceStopRequestMapper.class),
+                fixture.elderMapper, fixture.userAccountMapper, fixture.userRoleMapper,
                 mock(ReservationExecutionLinkMapper.class), mock(ServiceReservationMapper.class), policy,
-                mock(AuditLogService.class));
+                mock(AuditLogService.class), mock(NotificationService.class), new ObjectMapper(), mock(cn.communityelderly.modules.order.service.FileEvidenceService.class),
+                Clock.system(ZoneId.of("Asia/Shanghai")));
 
         UserContext.set(user("10", "COMMUNITY_ADMIN", String.valueOf(COMMUNITY_ID)));
         when(fixture.userAccountMapper.selectById(88L)).thenReturn(targetAccount);
@@ -544,7 +605,7 @@ class WorkOrderCareWorkerAuthorizationTest {
     private static WorkOrderExecutionDTO execution() {
         WorkOrderExecutionDTO dto = new WorkOrderExecutionDTO();
         dto.setResultSummary("已完成现场照护");
-        dto.setPhotoUrls(List.of("/api/v1/files/view/evidence.jpg"));
+        dto.setEvidenceAssetUuids(List.of("00000000-0000-0000-0000-000000000011"));
         dto.setIsExemptPhoto(false);
         return dto;
     }

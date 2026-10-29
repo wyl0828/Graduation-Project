@@ -162,7 +162,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { ApiError } from '../../api/http'
-import { adminApi } from '../../api/adminApi'
+import { adminApi, clearPendingIdempotencyKey } from '../../api/adminApi'
 
 type SosEvent = {
   sosId: number
@@ -226,7 +226,9 @@ function formatDate(value?: string | null) {
 function apiErrorMessage(error: unknown) {
   const apiError = error as ApiError
   if (apiError?.status === 401) return '登录状态已失效，请重新登录后再操作。'
-  if (apiError?.status === 409) return '记录状态已变化，页面没有提交本地成功状态，请刷新后重试。'
+  if (apiError?.status === 409) return apiError.message
+    ? `服务端暂未确认操作（HTTP 409）：${apiError.message}`
+    : '服务端暂未确认操作（HTTP 409），请稍后重试并核对服务端状态。'
   if (apiError?.status) return apiError.message || `服务端请求失败（HTTP ${apiError.status}）`
   if (error instanceof Error) return error.message
   return '服务暂不可用，请检查网络后重试。'
@@ -311,7 +313,8 @@ async function submitSosDispatch() {
   }
   sosActionLoading.value = true
   try {
-    await adminApi.dispatchSos(sos.sosId, { assigneeId, dispatchReason: sosDispatchReason.value.trim() || undefined })
+    const requestBody = { assigneeId, dispatchReason: sosDispatchReason.value.trim() || undefined }
+    await adminApi.dispatchSos(sos.sosId, requestBody)
     const response = await adminApi.getSosEvents('ACCEPTED')
     const rows = requireList<SosEvent>(response.data, '活动 SOS')
     activeSosList.value = rows
@@ -319,6 +322,7 @@ async function submitSosDispatch() {
     if (!updated || updated.assigneeId !== assigneeId) {
       throw new Error('派单请求已返回，但服务端回读未确认目标责任人；列表已按服务端数据刷新。')
     }
+    clearPendingIdempotencyKey('POST', `/emergency/sos/${sos.sosId}/dispatch`, requestBody)
     sosDispatchVisible.value = false
     ElMessage.success('SOS 派单已由服务端确认。')
   } catch (error) {
@@ -338,13 +342,15 @@ async function submitSosClose() {
   }
   sosActionLoading.value = true
   try {
-    await adminApi.closeSos(sos.sosId, { resultSummary, isFalseAlarm: sosFalseAlarm.value })
+    const requestBody = { resultSummary, isFalseAlarm: sosFalseAlarm.value }
+    await adminApi.closeSos(sos.sosId, requestBody)
     const response = await adminApi.getSosEvents('ACCEPTED')
     const rows = requireList<SosEvent>(response.data, '活动 SOS')
     activeSosList.value = rows
     if (rows.some(item => item.sosId === sos.sosId)) {
       throw new Error('结案请求已返回，但服务端仍将此记录列为活动 SOS；页面保留服务端当前状态。')
     }
+    clearPendingIdempotencyKey('POST', `/emergency/sos/${sos.sosId}/close`, requestBody)
     sosCloseVisible.value = false
     ElMessage.success('SOS 结案状态已由服务端列表回读确认。')
   } catch (error) {

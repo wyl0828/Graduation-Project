@@ -168,6 +168,7 @@ VALUES (1, '1', 'bootstrap empty schema', 'SQL', 'V1__bootstrap_empty_schema.sql
     Copy-Item -LiteralPath $sourceCredentialDoc -Destination $seedCredentialDoc
     $env:AUTH_TEST_SEED_DOC_PATH = $seedCredentialDoc
 
+    $authTestStartedAt = Get-Date
     Push-Location (Join-Path $repoRoot 'services\api')
     try {
         & mvn '-Dtest=AuthDatabaseIntegrationTest' test
@@ -176,8 +177,23 @@ VALUES (1, '1', 'bootstrap empty schema', 'SQL', 'V1__bootstrap_empty_schema.sql
     finally { Pop-Location }
     Assert-That ($mavenExitCode -eq 0) "AuthDatabaseIntegrationTest failed with exit code $mavenExitCode."
 
+    $authSurefireReport = Join-Path $repoRoot 'services\api\target\surefire-reports\TEST-cn.communityelderly.modules.auth.AuthDatabaseIntegrationTest.xml'
+    Assert-That (Test-Path -LiteralPath $authSurefireReport) 'AuthDatabaseIntegrationTest did not write its Surefire report.'
+    Assert-That ((Get-Item -LiteralPath $authSurefireReport).LastWriteTime -ge $authTestStartedAt) `
+        'AuthDatabaseIntegrationTest Surefire report was not refreshed by this isolated run.'
+    [xml]$authSuite = Get-Content -LiteralPath $authSurefireReport -Raw -Encoding UTF8
+    $authTestCount = [int]$authSuite.testsuite.tests
+    $authSkippedCount = [int]$authSuite.testsuite.skipped
+    $authFailureCount = [int]$authSuite.testsuite.failures
+    $authErrorCount = [int]$authSuite.testsuite.errors
+    Assert-That ($authTestCount -gt 0 -and $authSkippedCount -eq 0 -and
+            $authFailureCount -eq 0 -and $authErrorCount -eq 0) `
+        "AuthDatabaseIntegrationTest did not execute cleanly (tests=$authTestCount, skipped=$authSkippedCount, failures=$authFailureCount, errors=$authErrorCount)."
+
     Write-Output 'PASS: applied isolated V1/V2/V3/V3_1 migrations to temporary MySQL.'
     Write-Output 'PASS: BCrypt login created a DB-backed Web session, CSRF digest and active role; revoked assignment denied the next request.'
+    Write-Output 'PASS: disabled-account access was rejected without request side effects; password change revoked the old session with a queryable reason and timestamp.'
+    Write-Output "PASS: AuthDatabaseIntegrationTest executed $authTestCount tests; Skipped: $authSkippedCount."
     Write-Output 'PASS: first-load seed imported in the isolated elderly_care_demo and all six documented synthetic accounts logged in.'
     Write-Output 'PASS: V3_1 phone/IP rate-limit state persisted in MySQL and enforced cooldown.'
 }

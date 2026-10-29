@@ -15,6 +15,7 @@ import cn.communityelderly.modules.auth.mapper.AuthSessionMapper;
 import cn.communityelderly.modules.auth.mapper.UserAccountMapper;
 import cn.communityelderly.modules.auth.mapper.UserRoleMapper;
 import cn.communityelderly.modules.auth.service.StaffManagementService;
+import cn.communityelderly.modules.order.service.WorkOrderService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -48,6 +49,7 @@ public class StaffManagementServiceImpl implements StaffManagementService {
     private final UserRoleMapper userRoleMapper;
     private final AuthSessionMapper authSessionMapper;
     private final AuditLogService auditLogService;
+    private final WorkOrderService workOrderService;
     private final ObjectMapper objectMapper;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
@@ -55,11 +57,13 @@ public class StaffManagementServiceImpl implements StaffManagementService {
                                       UserRoleMapper userRoleMapper,
                                       AuthSessionMapper authSessionMapper,
                                       AuditLogService auditLogService,
+                                      WorkOrderService workOrderService,
                                       ObjectMapper objectMapper) {
         this.userAccountMapper = userAccountMapper;
         this.userRoleMapper = userRoleMapper;
         this.authSessionMapper = authSessionMapper;
         this.auditLogService = auditLogService;
+        this.workOrderService = workOrderService;
         this.objectMapper = objectMapper;
     }
 
@@ -220,6 +224,14 @@ public class StaffManagementServiceImpl implements StaffManagementService {
                 && currentRoles.contains("COMMUNITY_ADMIN")
                 && !requestedRoles.contains("COMMUNITY_ADMIN")) {
             ensureAnotherCommunityAdmin(userId, scope.communityId());
+        }
+
+        boolean losesAllWorkOrderRoles = currentRoles.stream()
+                .anyMatch(role -> "GRID_WORKER".equals(role) || "CARE_WORKER".equals(role))
+                && requestedRoles.stream().noneMatch(role -> "GRID_WORKER".equals(role) || "CARE_WORKER".equals(role));
+        if (losesAllWorkOrderRoles) {
+            workOrderService.markOpenOrdersForWorkerHandoff(userId, scope.communityId(),
+                    scope.actorUserId(), reason);
         }
 
         LocalDateTime now = LocalDateTime.now(SERVER_ZONE);

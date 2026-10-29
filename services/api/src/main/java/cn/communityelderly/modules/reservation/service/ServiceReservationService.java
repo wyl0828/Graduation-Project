@@ -1,6 +1,8 @@
 package cn.communityelderly.modules.reservation.service;
 
 import cn.communityelderly.modules.reservation.dto.ReservationCreateDTO;
+import cn.communityelderly.modules.reservation.dto.ReservationCancelRequestVO;
+import cn.communityelderly.modules.reservation.dto.ReservationCancelReviewDTO;
 import cn.communityelderly.modules.reservation.dto.ReservationVO;
 
 import java.util.List;
@@ -11,4 +13,6 @@ public interface ServiceReservationService {
     List<ReservationVO> listElderReservations(Long elderId);
     ReservationVO getReservationDetail(Long reservationId);
     void cancelReservation(Long reservationId, String reason, Long userId);
+    List<ReservationCancelRequestVO> listPendingCancellationRequests();
+    void reviewCancellationRequest(Long cancelId, ReservationCancelReviewDTO dto, Long reviewerUserId);
 }

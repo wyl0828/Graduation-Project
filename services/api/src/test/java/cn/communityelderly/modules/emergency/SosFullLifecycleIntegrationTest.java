@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.BeanWrapperImpl;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
@@ -137,7 +138,10 @@ class SosFullLifecycleIntegrationTest {
         assertNotNull(sosEvent);
         assertNotNull(sosEvent.getSosId());
         assertEquals("ACCEPTED", sosEvent.getStatus());
+        assertEquals(Boolean.FALSE, readInactiveAtAcceptance(sosEvent),
+                "An SOS accepted for an active elder must retain an explicit active-at-acceptance snapshot");
         assertNotNull(sosEvent.getWorkOrderId());
+        assertEquals(Boolean.FALSE, readInactiveAtAcceptance(sosEventMapper.selectById(sosEvent.getSosId())));
 
         // 验证原子生成的工单
         WorkOrder workOrder = workOrderMapper.selectById(sosEvent.getWorkOrderId());
@@ -180,5 +184,43 @@ class SosFullLifecycleIntegrationTest {
         WorkOrder closedOrder = workOrderMapper.selectById(sosEvent.getWorkOrderId());
         assertEquals("CLOSED", closedOrder.getStatus());
         assertNotNull(closedOrder.getServiceFinishTime());
+    }
+
+    @Test
+    @DisplayName("AT-19: 停用档案仍可由有效老人账号触发 SOS 并向管理员保留停档快照")
+    void inactiveElderSosPersistsInactiveAtAcceptanceMarkerForAdminReview() {
+        UserContext.set(adminUser);
+        elderArchiveService.updateElderStatus(elderId, "INACTIVE", "AT-19 停用档案 SOS 快照回归");
+
+        UserContext.set(elderUser);
+        SosTriggerDTO triggerDTO = new SosTriggerDTO();
+        triggerDTO.setElderId(elderId);
+        triggerDTO.setPressDurationMs(2200);
+        triggerDTO.setLocationAddress("南京市玄武区锁金村15幢204");
+        triggerDTO.setIdempotencyKey(UUID.randomUUID().toString());
+
+        SosEventVO accepted = sosEventService.triggerSos(triggerDTO);
+        assertNotNull(accepted.getSosId());
+        assertEquals("ACCEPTED", accepted.getStatus());
+        assertEquals(Boolean.TRUE, readInactiveAtAcceptance(accepted));
+
+        SosEvent persisted = sosEventMapper.selectById(accepted.getSosId());
+        assertEquals(Boolean.TRUE, readInactiveAtAcceptance(persisted),
+                "The SOS event must persist the archive state observed while accepting the request");
+
+        UserContext.set(adminUser);
+        SosEventVO adminReview = sosEventService.listSosEvents("ACCEPTED").stream()
+                .filter(item -> accepted.getSosId().equals(item.getSosId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(Boolean.TRUE, readInactiveAtAcceptance(adminReview),
+                "The community administrator SOS review list must expose the immutable acceptance snapshot");
+    }
+
+    private Boolean readInactiveAtAcceptance(Object eventOrView) {
+        BeanWrapperImpl wrapper = new BeanWrapperImpl(eventOrView);
+        assertTrue(wrapper.isReadableProperty("elderInactiveAtAcceptance"),
+                "SOS event and review view must expose the archived-at-acceptance snapshot");
+        return (Boolean) wrapper.getPropertyValue("elderInactiveAtAcceptance");
     }
 }

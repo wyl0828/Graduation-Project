@@ -7,8 +7,10 @@ import cn.communityelderly.modules.elder.entity.ElderProfile;
 import cn.communityelderly.modules.elder.mapper.ElderProfileMapper;
 import cn.communityelderly.modules.emergency.entity.SosEvent;
 import cn.communityelderly.modules.emergency.entity.WorkOrder;
+import cn.communityelderly.modules.emergency.entity.WorkOrderActionHistory;
 import cn.communityelderly.modules.emergency.mapper.SosEventMapper;
 import cn.communityelderly.modules.emergency.mapper.WorkOrderMapper;
+import cn.communityelderly.modules.emergency.mapper.WorkOrderActionHistoryMapper;
 import cn.communityelderly.modules.health.entity.HealthAlert;
 import cn.communityelderly.modules.health.mapper.HealthAlertMapper;
 import cn.communityelderly.modules.medication.entity.MedicationPlan;
@@ -18,6 +20,8 @@ import cn.communityelderly.modules.medication.mapper.MedicationTaskMapper;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.time.Clock;
+import java.time.ZoneId;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
@@ -34,19 +38,25 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
     private final SosEventMapper sosEventMapper;
     private final MedicationTaskMapper medicationTaskMapper;
     private final MedicationPlanMapper medicationPlanMapper;
+    private final WorkOrderActionHistoryMapper actionHistoryMapper;
+    private final Clock clock;
 
     public CommunityDashboardServiceImpl(ElderProfileMapper elderProfileMapper,
                                          WorkOrderMapper workOrderMapper,
                                          HealthAlertMapper healthAlertMapper,
                                          SosEventMapper sosEventMapper,
                                          MedicationTaskMapper medicationTaskMapper,
-                                         MedicationPlanMapper medicationPlanMapper) {
+                                         MedicationPlanMapper medicationPlanMapper,
+                                         WorkOrderActionHistoryMapper actionHistoryMapper,
+                                         Clock clock) {
         this.elderProfileMapper = elderProfileMapper;
         this.workOrderMapper = workOrderMapper;
         this.healthAlertMapper = healthAlertMapper;
         this.sosEventMapper = sosEventMapper;
         this.medicationTaskMapper = medicationTaskMapper;
         this.medicationPlanMapper = medicationPlanMapper;
+        this.actionHistoryMapper = actionHistoryMapper;
+        this.clock = clock.withZone(ZoneId.of("Asia/Shanghai"));
     }
 
     @Override
@@ -62,7 +72,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         Long totalElders = elderProfileMapper.selectCount(elderQuery);
         vo.setTotalElders(totalElders != null ? totalElders : 0L);
 
-        LocalDate eightyYearsAgo = LocalDate.now().minusYears(80);
+        LocalDate eightyYearsAgo = LocalDate.now(clock).minusYears(80);
         LambdaQueryWrapper<ElderProfile> highAgeQuery = new LambdaQueryWrapper<ElderProfile>()
                 .eq(ElderProfile::getStatus, "ACTIVE")
                 .le(ElderProfile::getBirthDate, eightyYearsAgo);
@@ -102,7 +112,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         }
         Long totalOrders = workOrderMapper.selectCount(totalOrderQuery);
 
-        LocalDateTime monthStart = YearMonth.now().atDay(1).atStartOfDay();
+        LocalDateTime monthStart = YearMonth.now(clock).atDay(1).atStartOfDay();
         LambdaQueryWrapper<WorkOrder> closedOrderQuery = new LambdaQueryWrapper<WorkOrder>()
                 .eq(WorkOrder::getStatus, "CLOSED")
                 .ge(WorkOrder::getReviewedAt, monthStart);
@@ -119,7 +129,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         vo.setMonthlyClosedOrders(closedOrders != null ? closedOrders : 0L);
 
         // 4. 用药合规率与今日打卡真实统计 (按老人所在社区隔离)
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(clock);
         long todayTasksCount = 0L;
         long confirmedTasksCount = 0L;
 
@@ -214,13 +224,13 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
 
         // 2. 服务需求结构 (根据实际工单业务类型聚合统计)
         List<ServiceStructureVO> services = new ArrayList<>();
-        LambdaQueryWrapper<WorkOrder> woWrapper = new LambdaQueryWrapper<WorkOrder>()
-                .ne(WorkOrder::getStatus, "VOIDED");
+        LambdaQueryWrapper<WorkOrder> woWrapper = new LambdaQueryWrapper<>();
         if (communityId != null) {
             woWrapper.eq(WorkOrder::getCommunityId, communityId);
         }
         List<WorkOrder> allOrders = workOrderMapper.selectList(woWrapper);
         Map<String, Long> serviceCountMap = allOrders.stream()
+                .filter(o -> !"VOIDED".equals(o.getStatus()))
                 .collect(Collectors.groupingBy(w -> w.getServiceType() != null ? w.getServiceType() : "OTHER", Collectors.counting()));
 
         // 标准 4 类核心助老服务需求结构
@@ -230,7 +240,7 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         serviceNames.put("MEAL_DELIVERY", "社区助餐配送");
         serviceNames.put("MEDICAL_ESCORT", "就医陪诊引导");
 
-        long totalOrdersCount = allOrders.size();
+        long totalOrdersCount = allOrders.stream().filter(o -> !"VOIDED".equals(o.getStatus())).count();
         long orderDenom = totalOrdersCount > 0 ? totalOrdersCount : 1L;
 
         for (Map.Entry<String, String> def : serviceNames.entrySet()) {
@@ -241,53 +251,99 @@ public class CommunityDashboardServiceImpl implements CommunityDashboardService 
         }
         chartsVO.setServiceStructure(services);
 
-        // 3. 近 7 天工单吞吐与平均响应时长复合趋势 (真实按天汇聚)
-        LocalDate now = LocalDate.now();
+        // 3. 接单响应按建单的上海自然日归属，历史只批量读取一次。
+        LocalDateTime snapshotTime = LocalDateTime.now(clock);
+        LocalDate today = snapshotTime.toLocalDate();
+        LocalDateTime windowStart = today.minusDays(6).atStartOfDay();
+        LocalDateTime windowEnd = today.plusDays(1).atStartOfDay();
+        List<WorkOrder> responseOrders = allOrders.stream()
+                .filter(o -> o.getCreatedAt() != null && !o.getCreatedAt().isBefore(windowStart)
+                        && o.getCreatedAt().isBefore(windowEnd))
+                .toList();
+        Map<Long, WorkOrder> ordersById = responseOrders.stream()
+                .collect(Collectors.toMap(WorkOrder::getWorkOrderId, o -> o));
+        Map<Long, LocalDateTime> firstAcceptances = new HashMap<>();
+        if (!ordersById.isEmpty()) {
+            List<WorkOrderActionHistory> actions = actionHistoryMapper.selectList(
+                    new LambdaQueryWrapper<WorkOrderActionHistory>()
+                            .in(WorkOrderActionHistory::getWorkOrderId, ordersById.keySet())
+                            .eq(WorkOrderActionHistory::getToStatus, "ACCEPTED")
+                            .in(WorkOrderActionHistory::getActionName, "ACCEPT", "TRIGGER_SOS")
+                            .le(WorkOrderActionHistory::getOccurredAt, snapshotTime));
+            for (WorkOrderActionHistory action : actions) {
+                WorkOrder order = ordersById.get(action.getWorkOrderId());
+                LocalDateTime acceptedAt = action.getOccurredAt();
+                if (order == null || acceptedAt == null || acceptedAt.isBefore(order.getCreatedAt())
+                        || acceptedAt.isAfter(snapshotTime) || !isValidAcceptance(action, order)) {
+                    continue;
+                }
+                firstAcceptances.merge(order.getWorkOrderId(), acceptedAt,
+                        (first, next) -> first.isBefore(next) ? first : next);
+            }
+        }
+        chartsVO.setWorkOrderTrend(buildTrend(allOrders, firstAcceptances, today));
+        Map<String, WorkOrder7DayTrendVO> categories = new LinkedHashMap<>();
+        categories.put("ORDINARY", buildTrend(allOrders.stream()
+                .filter(o -> !"SOS".equals(o.getSourceType())).toList(), firstAcceptances, today));
+        categories.put("SOS", buildTrend(allOrders.stream()
+                .filter(o -> "SOS".equals(o.getSourceType())).toList(), firstAcceptances, today));
+        chartsVO.setWorkOrderTrendByCategory(categories);
+
+        return chartsVO;
+    }
+
+    private boolean isValidAcceptance(WorkOrderActionHistory action, WorkOrder order) {
+        if (!"ACCEPTED".equals(action.getToStatus())) return false;
+        return ("ACCEPT".equals(action.getActionName()) && "DISPATCHED".equals(action.getFromStatus()))
+                || ("TRIGGER_SOS".equals(action.getActionName()) && "SOS".equals(order.getSourceType())
+                && "PENDING_DISPATCH".equals(action.getFromStatus()));
+    }
+
+    private WorkOrder7DayTrendVO buildTrend(List<WorkOrder> orders, Map<Long, LocalDateTime> firstAcceptances,
+                                           LocalDate today) {
         DateTimeFormatter df = DateTimeFormatter.ofPattern("MM-dd");
         List<String> dates = new ArrayList<>();
         List<Long> dispatched = new ArrayList<>();
         List<Long> closed = new ArrayList<>();
         List<Double> latencies = new ArrayList<>();
+        List<Long> accepted = new ArrayList<>();
+        List<Long> unaccepted = new ArrayList<>();
 
         for (int i = 6; i >= 0; i--) {
-            LocalDate d = now.minusDays(i);
+            LocalDate d = today.minusDays(i);
             dates.add(d.format(df));
 
             LocalDateTime dayStart = d.atStartOfDay();
             LocalDateTime dayEnd = d.plusDays(1).atStartOfDay();
 
-            long dayDispatched = allOrders.stream()
+            List<WorkOrder> dayOrders = orders.stream()
                     .filter(o -> o.getCreatedAt() != null && !o.getCreatedAt().isBefore(dayStart) && o.getCreatedAt().isBefore(dayEnd))
-                    .count();
-            dispatched.add(dayDispatched);
+                    .toList();
+            dispatched.add((long) dayOrders.size());
 
-            List<WorkOrder> dayClosedOrders = allOrders.stream()
+            List<WorkOrder> dayClosedOrders = orders.stream()
                     .filter(o -> "CLOSED".equalsIgnoreCase(o.getStatus()) && o.getReviewedAt() != null
                             && !o.getReviewedAt().isBefore(dayStart) && o.getReviewedAt().isBefore(dayEnd))
                     .toList();
             closed.add((long) dayClosedOrders.size());
 
-            // 履约平均时长 (服务结束时间 - 服务开始时间，单位分钟)
-            double avgMinutes = 0.0;
-            if (!dayClosedOrders.isEmpty()) {
-                long totalMins = 0;
-                int countWithDuration = 0;
-                for (WorkOrder o : dayClosedOrders) {
-                    if (o.getServiceStartTime() != null && o.getServiceFinishTime() != null) {
-                        totalMins += Duration.between(o.getServiceStartTime(), o.getServiceFinishTime()).toMinutes();
-                        countWithDuration++;
-                    }
-                }
-                if (countWithDuration > 0) {
-                    avgMinutes = Math.round((totalMins * 1.0 / countWithDuration) * 10.0) / 10.0;
-                }
-            }
-            latencies.add(avgMinutes);
+            DoubleSummaryStatistics response = dayOrders.stream()
+                    .filter(o -> firstAcceptances.containsKey(o.getWorkOrderId()))
+                    .mapToDouble(o -> Duration.between(o.getCreatedAt(), firstAcceptances.get(o.getWorkOrderId()))
+                            .toMillis() / 60000.0)
+                    .summaryStatistics();
+            accepted.add(response.getCount());
+            unaccepted.add(dayOrders.stream()
+                    .filter(o -> !firstAcceptances.containsKey(o.getWorkOrderId()))
+                    .filter(o -> Set.of("PENDING_DISPATCH", "DISPATCHED", "PENDING_ACCEPT").contains(o.getStatus()))
+                    .count());
+            latencies.add(response.getCount() == 0 ? null : Math.round(response.getAverage() * 10.0) / 10.0);
         }
 
-        chartsVO.setWorkOrderTrend(new WorkOrder7DayTrendVO(dates, dispatched, closed, latencies));
-
-        return chartsVO;
+        WorkOrder7DayTrendVO trend = new WorkOrder7DayTrendVO(dates, dispatched, closed, latencies);
+        trend.setAcceptedCounts(accepted);
+        trend.setUnacceptedCounts(unaccepted);
+        return trend;
     }
 
     @Override

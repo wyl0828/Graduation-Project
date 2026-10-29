@@ -1,6 +1,7 @@
 package cn.communityelderly.modules.order.controller;
 
 import cn.communityelderly.common.api.Result;
+import cn.communityelderly.common.idempotency.Idempotency;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.common.security.UserContext;
@@ -45,6 +46,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/dispatch")
+    @Idempotency(required = true)
     @RequireRoles({"COMMUNITY_ADMIN"})
     public Result<Void> dispatchOrder(@PathVariable Long workOrderId,
                                       @Valid @RequestBody WorkOrderDispatchDTO dto) {
@@ -54,6 +56,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/accept")
+    @Idempotency(required = true)
     @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> acceptOrder(@PathVariable Long workOrderId) {
         CurrentUser user = UserContext.requireCurrentUser();
@@ -62,6 +65,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/reject")
+    @Idempotency(required = true)
     @RequireRoles({"GRID_WORKER"})
     public Result<Void> rejectOrder(@PathVariable Long workOrderId,
                                     @Valid @RequestBody WorkOrderActionDTO dto) {
@@ -71,6 +75,7 @@ public class WorkOrderController {
     }
 
     @PostMapping("/{workOrderId}/start")
+    @Idempotency(required = true)
     @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> startService(@PathVariable Long workOrderId) {
         CurrentUser user = UserContext.requireCurrentUser();

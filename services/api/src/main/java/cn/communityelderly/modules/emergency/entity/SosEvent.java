@@ -23,6 +23,7 @@ public class SosEvent {
     private Long initialWorkOrderId;
     private String idempotencyKey;
     private LocalDateTime occurredAt;
+    private Boolean elderInactiveAtAcceptance;
 
     public Long getSosId() {
         return sosId;
@@ -110,5 +111,13 @@ public class SosEvent {
 
     public void setOccurredAt(LocalDateTime occurredAt) {
         this.occurredAt = occurredAt;
+    }
+
+    public Boolean getElderInactiveAtAcceptance() {
+        return elderInactiveAtAcceptance;
+    }
+
+    public void setElderInactiveAtAcceptance(Boolean elderInactiveAtAcceptance) {
+        this.elderInactiveAtAcceptance = elderInactiveAtAcceptance;
     }
 }

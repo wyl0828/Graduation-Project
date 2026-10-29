@@ -37,7 +37,7 @@ class HttpClient {
       localStorage.removeItem('user')
       localStorage.removeItem('csrfToken')
       localStorage.removeItem('activeRole')
-      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      if (!headers.has('Idempotency-Key') && typeof window !== 'undefined' && window.location.pathname !== '/login') {
         window.location.href = '/login'
       }
     }

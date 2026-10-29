@@ -2,6 +2,7 @@ package cn.communityelderly.modules.emergency.controller;
 
 import cn.communityelderly.common.api.Result;
 import cn.communityelderly.common.idempotency.Idempotency;
+import cn.communityelderly.common.idempotency.IdempotencyInterceptor;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.modules.emergency.dto.*;
 import cn.communityelderly.modules.emergency.service.SosEventService;
@@ -21,14 +22,18 @@ public class SosEventController {
     }
 
     @PostMapping("/trigger")
-    @Idempotency(required = false)
+    @Idempotency(required = true)
     @RequireRoles({"ELDER"})
-    public Result<SosEventVO> triggerSos(@Valid @RequestBody SosTriggerDTO dto) {
+    public Result<SosEventVO> triggerSos(
+            @Valid @RequestBody SosTriggerDTO dto,
+            @RequestHeader(IdempotencyInterceptor.IDEMPOTENCY_KEY_HEADER) String idempotencyKey) {
+        dto.setIdempotencyKey(idempotencyKey.trim());
         SosEventVO vo = sosEventService.triggerSos(dto);
         return Result.success(vo);
     }
 
     @PostMapping("/{sosId}/cancel")
+    @Idempotency(required = true)
     @RequireRoles({"ELDER"})
     public Result<Void> cancelSosByElder(@PathVariable Long sosId, @RequestBody(required = false) SosCancelDTO dto) {
         sosEventService.cancelSosByElder(sosId, dto);
@@ -48,6 +53,7 @@ public class SosEventController {
     }
 
     @PostMapping("/{sosId}/dispatch")
+    @Idempotency(required = true)
     @RequireRoles({"COMMUNITY_ADMIN"})
     public Result<Void> dispatchSos(@PathVariable Long sosId, @Valid @RequestBody SosDispatchDTO dto) {
         sosEventService.dispatchSos(sosId, dto);
@@ -55,6 +61,7 @@ public class SosEventController {
     }
 
     @PostMapping("/{sosId}/close")
+    @Idempotency(required = true)
     @RequireRoles({"COMMUNITY_ADMIN"})
     public Result<Void> closeSos(@PathVariable Long sosId, @Valid @RequestBody SosCloseDTO dto) {
         sosEventService.closeSos(sosId, dto);

@@ -151,11 +151,12 @@
             :on-remove="handleRemoveUploadedFile"
             :disabled="submittingReport"
             multiple
-            accept="image/png,image/jpeg,image/jpg,image/webp"
+            accept="image/png,image/jpeg"
+            :limit="5"
           >
             <div class="el-upload__text">
               将现场服务照片拖到此处，或<em>点击选择图片</em>
-              <div class="upload-tip">支持 JPG、PNG、WEBP，单张不超过 10MB</div>
+              <div class="upload-tip">支持 JPEG、PNG，单张不超过 5MB，每次结果最多 5 张</div>
             </div>
           </el-upload>
           <div class="upload-count">已由服务端确认 {{ uploadedPhotoUrls.length }} 张照片地址<span v-if="uploadingCount">，正在上传 {{ uploadingCount }} 张</span></div>
@@ -233,7 +234,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, type UploadRequestOptions } from 'element-plus'
 import type { ApiError } from '../../api/http'
-import { adminApi } from '../../api/adminApi'
+import { adminApi, clearPendingIdempotencyKey } from '../../api/adminApi'
 
 type WorkOrder = {
   workOrderId: number
@@ -254,6 +255,7 @@ type WorkOrder = {
   resultPhotoRequired?: boolean | null
   photoExemptionReason?: string | null
   photoUrls?: string[] | null
+  evidenceAssetUuids?: string[] | null
   reviewComment?: string | null
 }
 
@@ -262,6 +264,7 @@ type UploadFile = {
   name: string
   url?: string
   status?: string
+  assetUuid?: string
 }
 
 const activeTab = ref<'WORKER_DESK' | 'REVIEW_DESK'>('WORKER_DESK')
@@ -301,7 +304,9 @@ const reportOrderLabel = computed(() => {
 function apiErrorMessage(error: unknown) {
   const apiError = error as ApiError
   if (apiError?.status === 401) return '登录状态已失效，请重新登录后再操作。'
-  if (apiError?.status === 409) return '工单状态已变化，本次操作未确认成功；请刷新后查看服务端状态并重试。'
+  if (apiError?.status === 409) return apiError.message
+    ? `服务端暂未确认操作（HTTP 409）：${apiError.message}`
+    : '服务端暂未确认操作（HTTP 409），请稍后核对服务端状态再重试。'
   if (apiError?.status) return apiError.message || `服务端请求失败（HTTP ${apiError.status}）`
   if (error instanceof Error) return error.message
   return '服务暂不可用，请检查网络后重试。'
@@ -410,6 +415,8 @@ async function transitionWorkerOrder(order: WorkOrder, action: 'accept' | 'start
     else await adminApi.startWorkOrder(order.workOrderId)
 
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, nextStatus)
+    const endpoint = `/work-orders/${order.workOrderId}/${action}`
+    clearPendingIdempotencyKey('POST', endpoint)
     replaceOrder(confirmedOrder)
     ElMessage.success(action === 'accept' ? '接单状态已由服务端详情确认。' : '服务开始状态已由服务端详情确认。')
     await loadData()
@@ -471,10 +478,18 @@ async function handleCustomUpload(options: UploadRequestOptions) {
   uploadingCount.value += 1
   try {
     const workOrderId = currentReportingOrder.value?.workOrderId
-    if (isCareWorker.value && workOrderId === undefined) {
-      throw new Error('无法确认当前工单，护工照片凭据未上传。请关闭窗口并重新打开工单。')
+    if (workOrderId === undefined) {
+      throw new Error('无法确认当前工单，请关闭窗口并重新打开工单。')
+    }
+    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      throw new Error('仅支持不超过 5MB 的 JPEG/PNG 照片。')
+    }
+    if (uploadedPhotoUrls.value.length + uploadingCount.value > 5) {
+      throw new Error('每次服务结果最多上传 5 张照片。')
     }
     const response = await adminApi.uploadPhotoEvidence(file, workOrderId)
+    const assetUuid = response.data?.assetUuid
+    if (typeof assetUuid !== 'string' || !/^[0-9a-f-]{36}$/i.test(assetUuid)) throw new Error('上传响应缺少有效文件版本。')
     const url = typeof response.data?.url === 'string' ? response.data.url.trim() : ''
     if (!url || url.startsWith('blob:') || url.startsWith('data:')) {
       throw new Error('上传响应未返回有效的服务端照片地址。')
@@ -485,8 +500,9 @@ async function handleCustomUpload(options: UploadRequestOptions) {
     if (fileEntry) {
       fileEntry.url = url
       fileEntry.status = 'success'
+      fileEntry.assetUuid = assetUuid
     } else {
-      uploadedFileList.value = [...uploadedFileList.value, { uid: uid ?? url, name: file.name, url, status: 'success' }]
+      uploadedFileList.value = [...uploadedFileList.value, { uid: uid ?? url, name: file.name, url, assetUuid, status: 'success' }]
     }
     options.onSuccess(response.data)
     ElMessage.success('照片已上传，服务端已返回凭据地址。')
@@ -506,7 +522,7 @@ function handleRemoveUploadedFile(file: UploadFile) {
   uploadedFileList.value = uploadedFileList.value.filter(item => item.uid !== file.uid)
 }
 
-function assertExecutionResultConfirmed(order: WorkOrder, summary: string, photoUrls: string[], exempt: boolean, exemptionReason: string) {
+function assertExecutionResultConfirmed(order: WorkOrder, summary: string, assets: string[], exempt: boolean, exemptionReason: string) {
   if (order.status !== 'PENDING_RESULT_REVIEW' || order.serviceResultSummary !== summary) {
     throw new Error('提交请求已返回，但详情未确认服务总结和待审核状态；本地填报内容已保留，请刷新后重试。')
   }
@@ -516,8 +532,8 @@ function assertExecutionResultConfirmed(order: WorkOrder, summary: string, photo
     }
     return
   }
-  const savedUrls = Array.isArray(order.photoUrls) ? order.photoUrls : []
-  if (order.resultPhotoRequired === false || photoUrls.some(url => !savedUrls.includes(url))) {
+  const savedAssets = Array.isArray(order.evidenceAssetUuids) ? order.evidenceAssetUuids : []
+  if (order.resultPhotoRequired === false || assets.some(id => !savedAssets.includes(id))) {
     throw new Error('提交请求已返回，但详情未确认全部服务端照片地址；本地填报内容已保留，请刷新后重试。')
   }
 }
@@ -527,6 +543,7 @@ async function handleSubmitReport() {
   const summary = reportSummary.value.trim()
   const exemptionReason = photoExemptionReason.value.trim()
   const photoUrls = [...uploadedPhotoUrls.value]
+  const assets = uploadedFileList.value.filter(file => file.status === 'success' && file.assetUuid).map(file => file.assetUuid as string)
   const exempt = isExemptPhoto.value
 
   if (!order) {
@@ -541,7 +558,7 @@ async function handleSubmitReport() {
     ElMessage.warning('申请免照时必须填写至少 5 个字的理由。')
     return
   }
-  if (!exempt && photoUrls.length === 0) {
+  if (!exempt && (assets.length === 0 || assets.length > 5 || assets.length !== photoUrls.length)) {
     ElMessage.warning('非免照服务请至少上传一张已确认服务端地址的现场照片。')
     return
   }
@@ -553,14 +570,16 @@ async function handleSubmitReport() {
   submittingReport.value = true
   operationError.value = ''
   try {
-    await adminApi.submitWorkOrderResult(order.workOrderId, {
+    const requestBody = {
       resultSummary: summary,
-      photoUrls: exempt ? [] : photoUrls,
+      evidenceAssetUuids: exempt ? [] : assets,
       isExemptPhoto: exempt,
       photoExemptionReason: exempt ? exemptionReason : undefined,
-    })
+    }
+    await adminApi.submitWorkOrderResult(order.workOrderId, requestBody)
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, 'PENDING_RESULT_REVIEW')
-    assertExecutionResultConfirmed(confirmedOrder, summary, photoUrls, exempt, exemptionReason)
+    assertExecutionResultConfirmed(confirmedOrder, summary, assets, exempt, exemptionReason)
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/execution/submit`, requestBody)
     replaceOrder(confirmedOrder)
     reportModalVisible.value = false
     ElMessage.success('服务成果及凭据已由服务端详情回读确认，已进入管理员审核。')
@@ -610,7 +629,8 @@ async function submitReview(action: 'APPROVE' | 'REJECT') {
   reviewAction.value = action
   operationError.value = ''
   try {
-    await adminApi.reviewWorkOrder(order.workOrderId, { action, reviewComment: comment })
+    const requestBody = { action, reviewComment: comment }
+    await adminApi.reviewWorkOrder(order.workOrderId, requestBody)
     const confirmedOrder = await readConfirmedOrder(order.workOrderId, expectedStatus)
     if (action === 'APPROVE' && confirmedOrder.reviewComment !== comment) {
       throw new Error('审核请求已返回，但详情未确认审核意见；页面保留本次输入，请刷新后重试。')
@@ -618,6 +638,7 @@ async function submitReview(action: 'APPROVE' | 'REJECT') {
     if (action === 'REJECT' && !confirmedOrder.reviewComment?.includes(comment)) {
       throw new Error('驳回请求已返回，但详情未确认驳回意见；页面保留本次输入，请刷新后重试。')
     }
+    clearPendingIdempotencyKey('POST', `/work-orders/${order.workOrderId}/review`, requestBody)
     pendingReviewOrders.value = pendingReviewOrders.value.filter(item => item.workOrderId !== confirmedOrder.workOrderId)
     reviewModalVisible.value = false
     ElMessage.success(action === 'APPROVE' ? '结案状态已由服务端详情确认。' : '退回重办状态已由服务端详情确认。')

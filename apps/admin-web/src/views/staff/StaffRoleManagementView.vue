@@ -180,7 +180,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import type { ApiError } from '../../api/http'
-import { adminApi, type StaffRoleCode, type StaffSummary } from '../../api/adminApi'
+import { adminApi, clearPendingIdempotencyKey, type StaffRoleCode, type StaffSummary } from '../../api/adminApi'
 
 const router = useRouter()
 const staffList = ref<StaffSummary[]>([])
@@ -312,10 +312,12 @@ async function saveRoles() {
   savingRoles.value = true
   roleError.value = ''
   const roles = [...roleForm.roles]
+  const requestBody = { roles, reason }
   const isCurrentUser = readCurrentUserId() === staff.userId
   try {
-    const response = await adminApi.replaceStaffRoles(staff.userId, { roles, reason })
+    const response = await adminApi.replaceStaffRoles(staff.userId, requestBody)
     if (isCurrentUser && !roles.includes('COMMUNITY_ADMIN')) {
+      clearPendingIdempotencyKey('PUT', `/admin/staff/${staff.userId}/roles`, requestBody)
       ElMessage.success('角色已更新，当前管理员权限已撤销，正在退出工作台。')
       clearLocalAuthState()
       roleDialogVisible.value = false
@@ -326,6 +328,7 @@ async function saveRoles() {
     if (isCurrentUser) {
       const currentUser = await adminApi.getCurrentUser()
       if (currentUser.data?.currentRole !== 'COMMUNITY_ADMIN') {
+        clearPendingIdempotencyKey('PUT', `/admin/staff/${staff.userId}/roles`, requestBody)
         clearLocalAuthState()
         roleDialogVisible.value = false
         await router.replace('/login')
@@ -333,17 +336,12 @@ async function saveRoles() {
       }
     }
 
+    clearPendingIdempotencyKey('PUT', `/admin/staff/${staff.userId}/roles`, requestBody)
     staffList.value = staffList.value.map(item => item.userId === response.data.userId ? response.data : item)
     roleDialogVisible.value = false
     ElMessage.success(isCurrentUser ? '角色请求已处理，当前会话仍有效。' : '工作人员角色请求已处理。')
     await loadStaff()
   } catch (error) {
-    if (isCurrentUser && [401, 403].includes((error as ApiError)?.status || 0)) {
-      clearLocalAuthState()
-      roleDialogVisible.value = false
-      await router.replace('/login')
-      return
-    }
     roleError.value = apiErrorMessage(error)
   } finally {
     savingRoles.value = false

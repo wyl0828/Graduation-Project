@@ -1,6 +1,7 @@
 package cn.communityelderly.modules.order.controller;
 
 import cn.communityelderly.common.api.Result;
+import cn.communityelderly.common.idempotency.Idempotency;
 import cn.communityelderly.common.security.CurrentUser;
 import cn.communityelderly.common.security.RequireRoles;
 import cn.communityelderly.common.security.UserContext;
@@ -21,6 +22,7 @@ public class WorkOrderExecutionController {
     }
 
     @PostMapping(value = {"/{workOrderId}/execution", "/{workOrderId}/execution/submit"})
+    @Idempotency(required = true)
     @RequireRoles({"GRID_WORKER", "CARE_WORKER"})
     public Result<Void> submitExecution(@PathVariable Long workOrderId,
                                         @Valid @RequestBody WorkOrderExecutionDTO dto) {
@@ -30,6 +32,7 @@ public class WorkOrderExecutionController {
     }
 
     @PostMapping("/{workOrderId}/review")
+    @Idempotency(required = true)
     @RequireRoles({"COMMUNITY_ADMIN"})
     public Result<Void> reviewWorkOrder(@PathVariable Long workOrderId,
                                         @Valid @RequestBody WorkOrderReviewDTO dto) {

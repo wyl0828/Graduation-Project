@@ -289,6 +289,7 @@ const activeSosStatus = ref('')
 const assigneeName = ref('')
 const assigneePhone = ref('')
 const pendingSosKey = ref<string | null>(null)
+const pendingSosCancelKey = ref<string | null>(null)
 
 // 紧急联系人首字头像字符
 const contactAvatarChar = computed(() => {
@@ -306,6 +307,8 @@ const currentMedName = ref('降糖药 (二甲双胍)')
 const currentMedUsage = ref('早餐后半小时 · 每日1次')
 const pendingMedCount = ref(1)
 const pendingTaskId = ref<number | null>(null)
+const pendingMedicationTaskId = ref<number | null>(null)
+const pendingMedicationKey = ref<string | null>(null)
 const medSubmitting = ref(false)
 
 // 设置弹窗状态
@@ -442,17 +445,42 @@ onUnmounted(() => {
 // 快捷打卡服药
 const handleConfirmMedication = async () => {
   if (pendingMedCount.value === 0 || medSubmitting.value) return
+  const taskId = pendingTaskId.value
+  if (!taskId) {
+    uni.showToast({ title: '无法确认待服药任务，请刷新后重试', icon: 'none' })
+    return
+  }
+  if (pendingMedicationTaskId.value !== taskId) {
+    pendingMedicationTaskId.value = taskId
+    pendingMedicationKey.value = null
+  }
+  if (!pendingMedicationKey.value) {
+    pendingMedicationKey.value = `med-${taskId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+
   medSubmitting.value = true
   try {
-    if (pendingTaskId.value) {
-      await elderApi.checkinMedication({ taskId: pendingTaskId.value, checkinMode: 'MANUAL' })
+    const response: any = await elderApi.checkinMedication({
+      taskId,
+      checkinMode: 'MANUAL',
+      idempotencyKey: pendingMedicationKey.value,
+    })
+    if (response?.data?.taskId !== taskId || response.data.status !== 'CONFIRMED') {
+      throw new Error('服务端未确认服药打卡状态')
     }
+
+    pendingMedicationKey.value = null
+    pendingMedicationTaskId.value = null
     pendingMedCount.value = 0
     uni.showToast({ title: '已确认服药！已记录时间', icon: 'success' })
-  } catch {
-    // 快速反馈
-    pendingMedCount.value = 0
-    uni.showToast({ title: '已记录本次服药！', icon: 'success' })
+  } catch (error: any) {
+    const statusText = typeof error?.statusCode === 'number' ? `HTTP ${error.statusCode}: ` : ''
+    uni.showModal({
+      title: '服药打卡未确认',
+      content: `${statusText}${error?.message || '无法确认本次打卡，待办状态已保留，请重试。'}`,
+      confirmText: '知道了',
+      showCancel: false,
+    })
   } finally {
     medSubmitting.value = false
   }
@@ -574,9 +602,11 @@ const triggerSosSuccess = async () => {
     }
     sosState.value = 'IDLE'
     if (typeof uni !== 'undefined' && uni.showModal) {
+      const statusText = typeof e?.statusCode === 'number' ? `HTTP ${e.statusCode}: ` : ''
+      const errorText = e?.message || '网络状态不确定'
       uni.showModal({
         title: '求助状态未确认',
-        content: '无法确认社区是否收到求助。请立即通过电话联系身边人员或当地急救服务，并可重试本次提交。',
+        content: `${statusText}${errorText}\n无法确认社区是否收到求助。请立即通过电话联系身边人员或当地急救服务，并可重试本次提交。`,
         confirmText: '知道了',
         confirmColor: '#DC2626',
         showCancel: false,
@@ -598,18 +628,30 @@ const handleConfirmCancel = async () => {
     uni.showToast({ title: '没有可取消的求助记录', icon: 'none' })
     return
   }
+  const sosId = currentSosId.value
+  const cancelReason = '老人确认误触取消'
+  if (!pendingSosCancelKey.value) {
+    pendingSosCancelKey.value = `sos-cancel-${sosId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
   let submitted = false
   try {
-    await elderApi.cancelSosByElder(currentSosId.value, '老人确认误触取消')
+    await elderApi.cancelSosByElder(sosId, cancelReason, pendingSosCancelKey.value)
     submitted = true
     const confirmed: any = await elderApi.getActiveSos(elderId.value || undefined)
-    if (confirmed?.data?.sosId !== currentSosId.value || confirmed.data.status !== 'CANCELLED') {
+    if (confirmed?.data?.sosId !== sosId || confirmed.data.status !== 'CANCELLED') {
       throw new Error('取消状态未确认')
     }
     sosState.value = 'CANCELLED'
+    pendingSosCancelKey.value = null
     uni.showToast({ title: '求助已取消', icon: 'success' })
   } catch (error: any) {
-    uni.showToast({ title: submitted ? '状态未确认，请刷新' : error.message || '取消失败，请重试', icon: 'none' })
+    const statusText = typeof error?.statusCode === 'number' ? `HTTP ${error.statusCode}: ` : ''
+    uni.showModal({
+      title: submitted ? '求助取消状态待核验' : '求助取消结果未确认',
+      content: `${statusText}${error?.message || '网络状态不确定'}\n请求键会保持不变，可重试同一取消操作核验服务端状态。`,
+      confirmText: '知道了',
+      showCancel: false,
+    })
   }
 }
 

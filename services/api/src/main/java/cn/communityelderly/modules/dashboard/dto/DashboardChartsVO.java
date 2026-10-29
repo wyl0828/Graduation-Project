@@ -1,11 +1,13 @@
 package cn.communityelderly.modules.dashboard.dto;
 
 import java.util.List;
+import java.util.Map;
 
 public class DashboardChartsVO {
     private List<DiseaseDistributionVO> diseaseDistribution;
     private List<ServiceStructureVO> serviceStructure;
     private WorkOrder7DayTrendVO workOrderTrend;
+    private Map<String, WorkOrder7DayTrendVO> workOrderTrendByCategory;
 
     public DashboardChartsVO() {
     }
@@ -38,5 +40,13 @@ public class DashboardChartsVO {
 
     public void setWorkOrderTrend(WorkOrder7DayTrendVO workOrderTrend) {
         this.workOrderTrend = workOrderTrend;
+    }
+
+    public Map<String, WorkOrder7DayTrendVO> getWorkOrderTrendByCategory() {
+        return workOrderTrendByCategory;
+    }
+
+    public void setWorkOrderTrendByCategory(Map<String, WorkOrder7DayTrendVO> workOrderTrendByCategory) {
+        this.workOrderTrendByCategory = workOrderTrendByCategory;
     }
 }

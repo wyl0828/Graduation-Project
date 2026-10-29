@@ -2,8 +2,10 @@ package cn.communityelderly.modules.auth;
 
 import cn.communityelderly.common.exception.BusinessException;
 import cn.communityelderly.common.security.CurrentUser;
+import cn.communityelderly.common.security.UserContext;
 import cn.communityelderly.modules.auth.dto.AuthTokenResponse;
 import cn.communityelderly.modules.auth.dto.LoginRequest;
+import cn.communityelderly.modules.auth.dto.PasswordChangeRequest;
 import cn.communityelderly.modules.auth.dto.RegisterChildRequest;
 import cn.communityelderly.modules.auth.entity.AuthSession;
 import cn.communityelderly.modules.auth.mapper.AuthSessionMapper;
@@ -32,6 +34,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -147,9 +150,56 @@ class AuthDatabaseIntegrationTest {
         assertEquals("WEB", authenticated.getClientType());
         assertTrue(sessionAuthenticationService.isCsrfTokenValid(persisted.getSessionId(), response.getCsrfToken()));
 
+        jdbc.update("UPDATE sys_user SET status='DISABLED', disabled_at=NOW(3), disabled_reason=? WHERE user_id=?",
+                "隔离认证测试停用", userId);
+        String disabledRequestFacts = getAuthenticationSideEffectFacts(persisted.getSessionId());
+        assertNull(sessionAuthenticationService.authenticate(response.getToken(), "/api/v1/auth/current-user"));
+        assertEquals(disabledRequestFacts, getAuthenticationSideEffectFacts(persisted.getSessionId()),
+                "A rejected request for a disabled account must not touch its session, audit, or notification facts.");
+        jdbc.update("UPDATE sys_user SET status='ACTIVE', disabled_at=NULL, disabled_reason=NULL WHERE user_id=?", userId);
+
+        CurrentUser beforePasswordChange = sessionAuthenticationService.authenticate(
+                response.getToken(), "/api/v1/auth/current-user");
+        assertNotNull(beforePasswordChange);
+        PasswordChangeRequest passwordChange = new PasswordChangeRequest();
+        passwordChange.setCurrentPassword(TEST_PASSWORD);
+        passwordChange.setNewPassword("isolated-next-password-123");
+        UserContext.set(beforePasswordChange);
+        try {
+            authService.changePassword(passwordChange);
+        } finally {
+            UserContext.clear();
+        }
+        AuthSession passwordRevokedSession = sessionMapper.selectById(persisted.getSessionId());
+        assertNotNull(passwordRevokedSession.getRevokedAt());
+        assertEquals("PASSWORD_RESET", passwordRevokedSession.getRevokeReason());
+        assertNull(sessionAuthenticationService.authenticate(response.getToken(), "/api/v1/auth/current-user"));
+
+        LoginRequest postPasswordLogin = new LoginRequest();
+        postPasswordLogin.setPhone(phone);
+        postPasswordLogin.setPassword("isolated-next-password-123");
+        postPasswordLogin.setClientType("MINIAPP");
+        AuthTokenResponse postPasswordSession = authService.login(postPasswordLogin, "192.0.2.111");
+        AuthSession persistedPostPasswordSession = sessionMapper.selectOne(new LambdaQueryWrapper<AuthSession>()
+                .eq(AuthSession::getTokenHash, MessageDigest.getInstance("SHA-256")
+                        .digest(postPasswordSession.getToken().getBytes(StandardCharsets.UTF_8))));
+        assertNotNull(persistedPostPasswordSession);
+
         jdbc.update("UPDATE sys_user_role SET status='REVOKED', revoked_at=NOW(3) WHERE assignment_id=?",
-                persisted.getActiveAssignmentId());
-        assertEquals(null, sessionAuthenticationService.authenticate(response.getToken(), "/api/v1/auth/current-user"));
+                persistedPostPasswordSession.getActiveAssignmentId());
+        assertNull(sessionAuthenticationService.authenticate(postPasswordSession.getToken(), "/api/v1/auth/current-user"));
+    }
+
+    private String getAuthenticationSideEffectFacts(String sessionId) {
+        return jdbc.queryForObject("SELECT CONCAT_WS('|', "
+                        + "DATE_FORMAT(last_activity_at, '%Y-%m-%d %H:%i:%s.%f'), "
+                        + "COALESCE(DATE_FORMAT(revoked_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL'), "
+                        + "COALESCE(revoke_reason, 'NULL'), "
+                        + "(SELECT COUNT(*) FROM audit_log), "
+                        + "(SELECT COUNT(*) FROM notification_event), "
+                        + "(SELECT COUNT(*) FROM notification_delivery)) "
+                        + "FROM auth_session WHERE session_id=?",
+                String.class, sessionId);
     }
 
     @Test

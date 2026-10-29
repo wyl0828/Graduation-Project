@@ -7,6 +7,8 @@ public class WorkOrder7DayTrendVO {
     private List<Long> dispatchedCounts;
     private List<Long> closedCounts;
     private List<Double> avgResponseMinutes;
+    private List<Long> acceptedCounts;
+    private List<Long> unacceptedCounts;
 
     public WorkOrder7DayTrendVO() {
     }
@@ -48,5 +50,21 @@ public class WorkOrder7DayTrendVO {
 
     public void setAvgResponseMinutes(List<Double> avgResponseMinutes) {
         this.avgResponseMinutes = avgResponseMinutes;
+    }
+
+    public List<Long> getAcceptedCounts() {
+        return acceptedCounts;
+    }
+
+    public void setAcceptedCounts(List<Long> acceptedCounts) {
+        this.acceptedCounts = acceptedCounts;
+    }
+
+    public List<Long> getUnacceptedCounts() {
+        return unacceptedCounts;
+    }
+
+    public void setUnacceptedCounts(List<Long> unacceptedCounts) {
+        this.unacceptedCounts = unacceptedCounts;
     }
 }
