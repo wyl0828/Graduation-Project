@@ -58,32 +58,100 @@ function onAddElder() {
 <style lang="scss" scoped>
 .context-switcher-root {
   width: 100%;
-  background: #ffffff;
-  padding: 10px 0;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+  background: transparent;
+  padding: 12px 0 6px;
   position: sticky;
   top: 0;
   z-index: 99;
 }
 
-.pill-scroll { width: 100%; white-space: nowrap; }
-.pill-track { display: inline-flex; gap: 10px; padding: 0 16px; }
+.pill-scroll {
+  width: 100%;
+  white-space: nowrap;
+}
+
+.pill-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+}
+
 .elder-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border-radius: 20px;
-  background: #f1f5f9;
-  border: 1.5px solid transparent;
+  gap: 8px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+  transition: all 0.2s ease;
 
-  .pill-name { font-size: 15px; font-weight: 700; color: #334155; }
-  .pill-badge { font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 6px; background: #e2e8f0; color: #475569; }
+  .pill-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #334155;
+  }
 
-  &.active { background: #f0f9ff; border-color: #0284c7; .pill-name { color: #0284c7; } .pill-badge { background: #0284c7; color: #fff; } }
-  &.disabled { opacity: 0.72; }
-  &.pending .pill-badge { background: #fef3c7; color: #92400e; }
-  &.frozen .pill-badge, &.rejected .pill-badge { background: #fee2e2; color: #991b1b; }
+  .pill-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #475569;
+  }
+
+  &.active {
+    background: #ffffff;
+    border: 2px solid #0284c7;
+    box-shadow: 0 2px 8px rgba(2, 132, 199, 0.12);
+
+    .pill-name {
+      color: #0284c7;
+      font-weight: 800;
+    }
+
+    .pill-badge {
+      background: #0284c7;
+      color: #ffffff;
+    }
+  }
+
+  &.disabled {
+    opacity: 0.75;
+  }
+
+  &.pending .pill-badge {
+    background: #fef3c7;
+    color: #92400e;
+  }
+
+  &.frozen .pill-badge,
+  &.rejected .pill-badge {
+    background: #fee2e2;
+    color: #991b1b;
+  }
 }
-.add-pill { background: #fafaf9; border: 1.5px dashed #cbd5e1; .add-icon { font-size: 18px; font-weight: 700; color: #64748b; } .add-text { font-size: 14px; font-weight: 600; color: #64748b; } }
+
+.add-pill {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  padding: 7px 16px;
+  border-radius: 999px;
+
+  .add-icon {
+    font-size: 15px;
+    font-weight: 700;
+    color: #475569;
+    margin-right: 4px;
+  }
+
+  .add-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: #475569;
+  }
+}
 </style>
