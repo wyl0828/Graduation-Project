@@ -1,0 +1,37 @@
+- generic [ref=e4]:
+  - generic [ref=e5]: 统一登录
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: 🏛️
+      - generic [ref=e15]: 社区居家养老服务系统
+      - generic [ref=e16]: 统一身份验证与授权访问
+    - generic [ref=e17]:
+      - generic [ref=e18]: 账号密码登录
+      - generic [ref=e19]:
+        - generic [ref=e20]: 手机号码
+        - generic [ref=e21]:
+          - generic [ref=e22]: "+86"
+          - generic [ref=e24]:
+            - generic: 请输入11位注册手机号
+            - spinbutton [ref=e25]
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e28]: 登录密码
+          - generic [ref=e29] [cursor=pointer]: 忘记密码？
+        - generic [ref=e30]:
+          - generic [ref=e32]:
+            - generic: 请输入至少8位密码
+            - textbox [ref=e33]
+          - generic [ref=e34] [cursor=pointer]: 🙈
+      - generic [ref=e35] [cursor=pointer]: 登 录
+    - generic [ref=e37]:
+      - generic [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]: 👵
+        - generic [ref=e40]:
+          - generic [ref=e41]: 长辈首次使用系统？
+          - generic [ref=e42]: 暂无短信核验服务，激活暂未开放
+      - generic [ref=e43] [cursor=pointer]:
+        - generic [ref=e44]: 👨‍👩‍👧
+        - generic [ref=e45]:
+          - generic [ref=e46]: 新家庭子女注册
+          - generic [ref=e47]: 暂无短信核验服务，注册暂未开放
